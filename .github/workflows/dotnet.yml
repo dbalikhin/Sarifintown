@@ -33,4 +33,4 @@ jobs:
     #  run: dotnet test --no-build --verbosity normal
 
     - name: Run .NET tests
-      run: dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj --configuration Release --no-build --verbosity normal
+      run: dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj --configuration Release --no-build --verbosity diag
