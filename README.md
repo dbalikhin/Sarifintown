@@ -36,7 +36,7 @@ Under development: Extract the whole methods with Tree-sitter WASM grammars to i
 3. **Analyze Results**  
    View findings grouped by severity and rule. Add code snippets via the Button. Inspect extracted code snippets.
 
-4. **Full Details Analysis**
+4. **Full Details Analysis**  
    If a SARIF file contains the code flow, you can view code threads and highlights using Tree-sitter grammars.
 
 ## License
