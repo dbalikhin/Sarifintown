@@ -1,0 +1,39 @@
+# This workflow will build a .NET project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
+
+name: .NET with Playwright Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0.x
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build --no-restore
+    #- name: Test
+    #  run: dotnet test --no-build --verbosity normal
+
+    # 4. Installs the Playwright browsers.
+    # The `playwright.sh` script is part of the Playwright package and is placed
+    # in the build output directory of your test project.
+    # Replace 'BlazorWasmTests.E2E' with the name of your test project.
+    - name: Install Playwright Browsers
+      run: pwsh ./Sarifintown.Tests/bin/Release/net9.0/playwright.sh install chrome
+
+    # 5. Runs the .NET tests.
+    - name: Run tests
+      run: dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj --configuration Release --no-build --verbosity normal
