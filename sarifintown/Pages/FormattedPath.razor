@@ -1,0 +1,41 @@
+﻿@using MudBlazor
+
+@code {
+    [Parameter]
+    public string Path { get; set; }
+
+    private List<string> _parts;
+
+    protected override void OnParametersSet()
+    {
+        if (!string.IsNullOrEmpty(Path))
+        {
+            // already normilized to use `\`
+            _parts = Path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+        }
+        else
+        {
+            _parts = new List<string>();
+        }
+    }
+}
+
+<MudText Color="Color.Info" Class="d-flex align-center">
+    @if (_parts != null && _parts.Count > 0)
+    {
+        @for (int i = 0; i < _parts.Count; i++)
+        {
+            if (i > 0)
+                @(" \\ ")
+
+            if (i == _parts.Count - 1)
+            {
+                <b>&nbsp;@(_parts[i] ?? "")</b>
+            }
+            else
+            {
+                @_parts[i]
+            }            
+        }
+    }
+</MudText>

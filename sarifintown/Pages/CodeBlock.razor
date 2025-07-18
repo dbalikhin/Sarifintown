@@ -1,0 +1,52 @@
+﻿@inject IJSRuntime JSRuntime
+
+<div>
+    <pre @ref="codeContainer" class="line-numbers" data-start="@StartLineNumber" data-line="@HighlightedLines" data-line-offset="@StartLineNumber">
+        <code class="language-@GetPrismLanguage(Language)">
+            @((MarkupString)System.Net.WebUtility.HtmlEncode(CodeContent))
+        </code>
+    </pre>
+</div>
+
+@code {
+    [Parameter] public string Language { get; set; }
+    [Parameter] public string CodeContent { get; set; }
+    [Parameter] public string HighlightedLines { get; set; }
+    [Parameter] public int StartLineNumber { get; set; } = 1;
+    [Parameter] public bool SplitWindowMode { get; set; }
+    [Parameter] public bool SingleWindowMode { get; set; }
+
+    private ElementReference codeContainer;
+
+    private string GetPrismLanguage(string language)
+    {
+        // Map storyboard to xml for PrismJS
+        if (string.Equals(language, "storyboard", StringComparison.OrdinalIgnoreCase))   
+            return "xml";  
+
+        return language;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // these weirdos to avoid
+        // https://stackoverflow.com/questions/60183421/blazor-typeerror-cannot-read-property-removechild-of-null-at-object-e-as-rem
+        // https://github.com/dotnet/aspnetcore/issues/42065
+        // https://developer.mozilla.org/en-US/docs/Web/API/MutationObserver
+        if (SplitWindowMode && !firstRender)
+        {
+            await JSRuntime.InvokeVoidAsync("PrismHighlightElement", codeContainer);
+        }
+
+        if (!SplitWindowMode && firstRender)
+        {
+            await JSRuntime.InvokeVoidAsync("PrismHighlightElement", codeContainer);
+        }
+
+        if (SingleWindowMode && firstRender)
+        {
+            await JSRuntime.InvokeVoidAsync("PrismHighlightElement", codeContainer);
+        }
+
+    }
+}

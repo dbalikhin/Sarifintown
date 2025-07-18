@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34701.34
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sarifintown", "Sarifintown\Sarifintown.csproj", "{69ECCA96-E434-49D3-989E-CD6B7773715C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Tests", "Sarifintown.Tests\Sarifintown.Tests.csproj", "{75CECCCA-4789-4555-975B-5E772FD99208}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{69ECCA96-E434-49D3-989E-CD6B7773715C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{69ECCA96-E434-49D3-989E-CD6B7773715C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{69ECCA96-E434-49D3-989E-CD6B7773715C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{69ECCA96-E434-49D3-989E-CD6B7773715C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{75CECCCA-4789-4555-975B-5E772FD99208}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{75CECCCA-4789-4555-975B-5E772FD99208}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{75CECCCA-4789-4555-975B-5E772FD99208}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{75CECCCA-4789-4555-975B-5E772FD99208}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7C016A35-4086-4FD0-A2BB-24C5E8ADFA92}
+	EndGlobalSection
+EndGlobal

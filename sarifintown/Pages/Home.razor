@@ -1,0 +1,249 @@
+﻿@page "/"
+@using System.Text.Json
+@using Sarifintown.Models
+@using Sarifintown.Services
+@inject SarifFileService SarifFileService
+@inject IJSRuntime JS
+@inject ISnackbar Snackbar
+@inject LocalFilesService LocalFilesService
+
+<PageTitle>Sarif In Town Start</PageTitle>
+
+<MudText Typo="Typo.h5" GutterBottom="true">To start analysis select a folder with the source code and/or add .sarif files.</MudText>
+
+
+<MudStack Style="width: 100%">
+
+    @if(LocalFilesService.AllDirectories.Any())
+    {
+        <MudText Color="Color.Success">Access granted for the follwing directories:</MudText>
+        <MudList T="DirectoryPicker">
+            @foreach (var directory in LocalFilesService.AllDirectories)
+            {
+                <MudListItem>
+                    <MudText Color="Color.Info">@($"ID: {directory.Id}, Name: {directory.Name}")</MudText>
+                    
+                </MudListItem>
+            }
+        </MudList>
+    }
+    else
+    {
+        <MudText Color="Color.Warning">No folder with the source code selected.</MudText>
+    }
+
+    <MudText>The application needs read-only access to the source code to:</MudText>
+    <MudText>Automatically add .sarif files from the root directory (non-recursive) and from the ".sarif" folder.</MudText>
+    <MudText>Extract code snippets from locations for each finding.</MudText>
+
+    <MudToolBar Class="justify-space-between" Dense>
+        <MudButtonGroup Color="Color.Primary" Variant="Variant.Outlined">
+            <MudButton Size="Size.Small" Variant="Variant.Filled" StartIcon="@Icons.Material.Outlined.SnippetFolder" Color="Color.Primary" OnClick="@(() => SelectDirectoryAsync())">
+                Select Source Code
+            </MudButton>
+        </MudButtonGroup>
+    </MudToolBar>
+
+    <MudDivider />
+
+    <MudText Typo="Typo.h6">Import additional .sarif files</MudText>
+
+    <MudFileUpload T="IReadOnlyList<IBrowserFile>"
+                   @ref="@_fileUpload"
+                   FilesChanged="UploadFiles"
+                   AppendMultipleFiles="false"
+                   Accept=".sarif"
+                   MaximumFileCount="10"
+                   Hidden="@false"
+                   InputClass="absolute mud-width-full mud-height-full overflow-hidden z-10"
+                   InputStyle="opacity:0"
+                   tabindex="-1"
+                   @ondrop="@ClearDragClass"
+                   @ondragenter="@SetDragClass"
+                   @ondragleave="@ClearDragClass"
+                   @ondragend="@ClearDragClass">
+        <ActivatorContent>
+            <MudPaper Height="300px"
+                      Outlined="true"
+                      Class="@_dragClass">
+                <MudText Typo="Typo.h6">
+                    Drag and drop files here or click
+                </MudText>
+                @foreach (var file in _fileNames)
+                {
+                    <MudChip T="string"
+                             Color="Color.Dark"
+                             Text="@file"
+                             tabindex="-1" />
+                }
+            </MudPaper>
+        </ActivatorContent>
+    </MudFileUpload>
+    <MudToolBar Gutters="@false"
+                Class="relative d-flex justify-end gap-4">
+        <MudButton Color="Color.Primary"
+                   OnClick="@OpenFilePickerAsync"
+                   Variant="Variant.Outlined">
+            Open file picker
+        </MudButton>
+
+    </MudToolBar>
+
+    <MudTextField T="string" Label="SARIF files import log" Variant="Variant.Text" Text="@importLog" AutoGrow MaxLines="10" ReadOnly Immediate="true"  />
+</MudStack>
+
+@code {
+    #nullable enable
+    private const string DefaultDragClass = "relative rounded-lg border-2 border-dashed pa-4 mt-4 mud-width-full mud-height-full";
+    private string _dragClass = DefaultDragClass;
+    private readonly List<string> _fileNames = new();
+    private MudFileUpload<IReadOnlyList<IBrowserFile>>? _fileUpload;
+    private string importLog = "";
+
+    private async Task SelectDirectoryAsync()
+    {
+        var result = await JS.InvokeAsync<DirectoryPickerResult>("fileSystemHelpers.getDirectoryHandle");
+
+        if (result != null)
+        {
+            if (result.Success)
+            {
+
+                LocalFilesService.AddDirectory(new DirectoryPicker() 
+                    {
+                        Id = result.DirectoryId,
+                        Name = result.Name,
+                        Subdirectories = result.Subdirectories,
+                    });
+
+                Snackbar.Add($"View access granted for: {result.Name}", Severity.Success);
+
+                var jsFiles = await JS.InvokeAsync<SarifFileData[]>("fileSystemHelpers.getSarifFilesFromDirectory", result.DirectoryId);
+
+                if (jsFiles.Length == 0)
+                {
+                    Snackbar.Add("No SARIF files found at the root level or in the .sarif folder. You need to add files manually.", Severity.Warning);
+                    return;
+                }
+
+                foreach (var jsFile in jsFiles)
+                {
+                    if (importLog.Length != 0)
+                        importLog += Environment.NewLine;
+
+                    importLog += "Importing " + jsFile.Name + " Size: " + jsFile.ByteBuffer.Length + " bytes." + Environment.NewLine;
+
+                    var sarifLog = JsonSerializer.Deserialize<SarifLog>(jsFile.ByteBuffer);
+                    ValidateAndAddSarifLog(sarifLog, jsFile.Name, jsFile.ByteBuffer.Length, result.DirectoryId);
+                }
+
+
+            }
+            else
+            {
+                Snackbar.Add($"{result.Error}", Severity.Error);
+            }
+        }
+        else
+        {
+            Snackbar.Add("Unexpected result from JavaScript.", Severity.Error);
+        }
+    }
+
+    private async Task ClearAsync()
+    {
+        await (_fileUpload?.ClearAsync() ?? Task.CompletedTask);
+        _fileNames.Clear();
+        ClearDragClass();
+    }
+
+    private Task OpenFilePickerAsync()
+        => _fileUpload?.OpenFilePickerAsync() ?? Task.CompletedTask;
+
+    private void OnInputFileChanged(InputFileChangeEventArgs e)
+    {
+        ClearDragClass();
+        var files = e.GetMultipleFiles();
+
+        foreach (var file in files)
+        {
+            _fileNames.Add(file.Name);
+
+        }
+    }
+
+    private async Task UploadFiles(IReadOnlyList<IBrowserFile> files)
+    {
+        foreach (var file in files)
+        {
+            if (importLog.Length != 0)
+                importLog += Environment.NewLine;
+
+            importLog += "Importing " + file.Name + " Size: " + file.Size + " bytes." + Environment.NewLine;
+            if (file.Size < 100 )
+            {
+                importLog += "File ignored. File size is less than 100 bytes." + Environment.NewLine;
+                continue;
+            }
+            SarifLog sarifJson;
+            try
+            {
+                if (!file.Name.EndsWith(".sarif") && !file.Name.EndsWith(".json"))
+                {
+                    importLog += "File ignored. Should have .sarif or .json extension." + Environment.NewLine;
+                    continue;
+                }
+                // expect BOM removed
+                // TODO: use new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false) everywhere to be more fault tolerant
+                using var stream = new MemoryStream();
+                await file.OpenReadStream(35000000).CopyToAsync(stream);
+                stream.Position = 0;
+                sarifJson = await JsonSerializer.DeserializeAsync<SarifLog>(stream);
+
+                ValidateAndAddSarifLog(sarifJson, file.Name, file.Size);
+            }
+            catch (Exception ex)
+            {
+                importLog += Environment.NewLine + "File ignored. " + ex.GetType() + ": " + ex.Message + Environment.NewLine;
+                importLog += ex.StackTrace + Environment.NewLine;
+            }
+
+            //var reader =  await new StreamReader(file.OpenReadStream()).ReadToEndAsync();
+        }
+
+    }
+
+    private bool ValidateAndAddSarifLog(SarifLog sarifLog, string filename, long size, int jsDirectoryId = 0)
+    {
+        if (sarifLog == null || !sarifLog.Version.Equals("2.1.0"))
+        {
+            importLog += "File ignored. File version should be 2.1.0." + Environment.NewLine;
+            return false;
+        }
+
+        if (sarifLog.Runs.Count == 0)
+        {
+            importLog += "File ignored. Empty sarif file." + Environment.NewLine;
+            return false;
+        }
+
+        var logAdded = SarifFileService.AddSarifFile(new SarifFile(filename, size, sarifLog), jsDirectoryId);
+        if (logAdded)
+        {
+            importLog += "Success: File added to the current analysis" + Environment.NewLine;
+            return true;
+        }
+        else
+        {
+            importLog += "Duplicate: File " + filename + " with the size " + size + " bytes imported already." + Environment.NewLine;
+            return false;
+        }
+    }
+
+
+    private void SetDragClass()
+        => _dragClass = $"{DefaultDragClass} mud-border-primary";
+
+    private void ClearDragClass()
+        => _dragClass = DefaultDragClass;
+}

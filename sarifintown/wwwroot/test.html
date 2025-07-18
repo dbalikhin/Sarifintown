@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tree-Sitter Test</title>
+</head>
+<body>
+    <h1>Tree-Sitter JavaScript Parser Test</h1>
+    <button onclick="parseJavaScriptCode()">Parse Code</button>
+    <pre id="output"></pre>
+
+    <!-- Include the tree-sitter library -->
+    <script src="js/tree-sitter/tree-sitter.js"></script>
+    
+    <script>
+        async function parseJavaScriptCode() {
+            try {
+                // Initialize Tree-sitter
+                const Parser = window.TreeSitter;
+
+                // Ensure the library is initialized
+                await Parser.init();
+                console.log("Tree-sitter initialized successfully.");
+
+                // Create a new parser instance
+                const parser = new Parser();
+
+                // Load the JavaScript language grammar (WASM module)
+                const JavaScript = await Parser.Language.load('js/tree-sitter/tree-sitter-javascript.wasm');
+                console.log("JavaScript language loaded successfully.");
+
+                // Set the language for the parser
+                parser.setLanguage(JavaScript);
+
+                // Sample source code to parse
+                const sourceCode = "let x = 1; console.log(x);";
+
+                // Parse the source code
+                const tree = parser.parse(sourceCode);
+
+                // Display the parsed tree in the output element
+                document.getElementById("output").textContent = tree.rootNode.toString();
+
+            } catch (error) {
+                // Log and display any errors
+                console.error("Error:", error);
+                document.getElementById("output").textContent = `Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

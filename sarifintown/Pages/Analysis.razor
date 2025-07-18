@@ -1,0 +1,317 @@
+﻿@page "/analysis"
+@using Sarifintown.Helpers
+@using Sarifintown.Models
+@using Sarifintown.Services
+@using System.Linq
+
+@inject SarifFileService SarifFileService
+@inject JSInteropService JSInteropService
+@inject IJSRuntime JS
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject LocalFilesService LocalFilesService
+
+<PageTitle>Analysis</PageTitle>
+
+
+<MudSelect T="SarifFile" MultiSelection="true" SelectAll="true" SelectAllText="Select all SARIF files"  @bind-SelectedValues="selectedFiles" 
+    MultiSelectionTextFunc="@(new Func<List<string>, string>(GetMultiSelectionText))" Label="SARIF files" AdornmentIcon="@Icons.Material.Filled.FilePresent">
+    @foreach (var sarifFile in SarifFileService.AllFiles)
+    {
+        <MudSelectItem T="SarifFile" Value="@sarifFile">@($"{sarifFile.Filename} ({sarifFile.Size} bytes)")</MudSelectItem>
+    }
+</MudSelect>
+
+
+
+@if (SarifFileService.Count == 0)
+{
+}
+else
+{
+    <MudPaper Elevation="2">        
+        <MudGrid >
+            <MudItem xs="12">
+                <MudTabs ActivePanelIndexChanged="OnTabActivated">
+                    @foreach (var run in selectedFiles.SelectMany(f => f.SarifLog.Runs))
+                    {
+                        <MudTabPanel Text="@run.Tool.Driver.Name">
+                            @if (run.Results.Count > 0)
+                            {                  
+                                <MudToolBar Class="justify-space-between" Dense >
+                                    <MudButtonGroup Color="Color.Primary" Variant="Variant.Outlined">
+                                        <MudButton Size="Size.Small" Variant="Variant.Filled" StartIcon="@Icons.Material.Outlined.Transform" Color="Color.Primary" OnClick="@(() => AddCodeSnippetsAsync(run))">
+                                            Add Code Snippets
+                                        </MudButton>
+                                    </MudButtonGroup>
+
+                                    <MudChipSet T="string" SelectionMode="SelectionMode.MultiSelection" CheckMark="true" Variant="Variant.Text" Color="Color.Info" SelectedValuesChanged="SeveritySelectionChanged">
+                                        <MudChip Color="Color.Error" Value="@("error")" Size="Size.Medium" Label="true" Selected>High (@run.Levels.Error)</MudChip>
+                                        <MudChip Color="Color.Warning" Value="@("warning")" Size="Size.Medium" Label="true" Selected>Medium (@run.Levels.Warning)</MudChip>
+                                        <MudChip Color="Color.Info" Value="@("note")" Size="Size.Medium" Label="true" Selected>Low (@run.Levels.Note)</MudChip>
+                                    </MudChipSet>
+
+                                    <MudSwitch @bind-Value="IsGrouped" Color="Color.Primary" Label="Group by File Path" />
+
+                                </MudToolBar>
+
+                                <MudToolBar Class="justify-space-between" Dense>
+                                    <MudText Class="ml-6" Typo="Typo.caption"></MudText>
+                                    <MudSpacer />
+                                    <MudSelect T="RuleWithCount" MultiSelectionTextFunc="@(new Func<List<string>, string>(GetMultiSelectionRuleText))" MultiSelection="true"
+                                               SelectedValues="_selectedRules" SelectedValuesChanged="RulesSelectedValuesChanged">
+                                        @foreach (var rule in run.UsedRules)
+                                        {
+                                            <MudSelectItem T="RuleWithCount" Value="@rule">@($"{rule.Rule.Id} ({rule.Count})")</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                </MudToolBar>
+                                
+                                <MudDataGrid T="Result" @ref="dataGrid"
+                                             Items="run.Results"
+                                             MultiSelection="true"
+                                             Filterable="true"
+                                             Hideable="true"
+                                             Groupable="true"
+                                             GroupExpanded="true"                                             
+                                             QuickFilter="FilterBySeverityAndRule"                                             
+                                             Dense>
+                                    <Columns>                                        
+                                        <PropertyColumn Property="x => x.FilenamePath" Title="File Path"
+                                                        Grouping="@IsGrouped" GroupBy="@(x => x.FilenamePath)" Hidden="true">
+                                            <GroupTemplate>
+                                                <span style="font-weight:bold"><MudChip Variant="Variant.Outlined" Color="Color.Primary" Size="Size.Medium">@context.Grouping.Count()</MudChip> @context.Grouping.Key</span>
+                                            </GroupTemplate>
+                                        </PropertyColumn>
+
+                                        <PropertyColumn Property="x => x.Severity" SortBy="@(x => x.Severity)" InitialDirection="SortDirection.Descending" Hidden />
+                                        
+                                        <TemplateColumn>
+                                            <CellTemplate>
+                                                <MudCard>
+                                                    <MudCardHeader>
+                                                        <CardHeaderAvatar>
+                                                            <MudAvatar Color="@GetAvatarColor(context.Item.Level)">@GetAvatarText(context.Item.Level)</MudAvatar>
+                                                        </CardHeaderAvatar>
+                                                        <CardHeaderContent>
+                                                            <MudText Typo="Typo.h5" Color="Color.Primary"><b>@context.Item.RuleId</b></MudText>
+                                                            <MudText Color="Color.Primary">@context.Item.Message.Text</MudText>
+                                                            <MudText>@context.Item.Rule.Name (@context.Item.Rule.ShortDescription.Text)</MudText>
+                                                        </CardHeaderContent>
+                                                    </MudCardHeader>
+
+
+                                                    <MudCardContent>
+
+                                                        @if (context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet == null && !string.IsNullOrEmpty(context.Item.Locations[0].PhysicalLocation.Region.Snippet?.Text))
+                                                        {
+                                                            <MudText Class="d-flex align-center ml-14" GutterBottom>                                                                
+                                                                <b>(Line: @context.Item.Locations[0].PhysicalLocation.Region.StartLine) @context.Item.Locations[0].PhysicalLocation.Region.Snippet?.Text</b>
+                                                            </MudText>
+                                                        }
+                                                        @if (context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet != null)
+                                                        {
+                                                            <MudText Class="d-flex align-center ml-14" GutterBottom>
+                                                                <b>(Line: @context.Item.Locations[0].PhysicalLocation.Region.StartLine) @context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.Snippet</b>
+                                                            </MudText>
+
+                                                            <CodeBlock Language="@context.Item.FilenameExt"
+                                                                       CodeContent="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.ContextSnippet"
+                                                                       HighlightedLines="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.StartLine.ToString()"
+                                                                       StartLineNumber="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.VisibleStartLine" />
+                                                        }
+
+                                                        <FormattedPath Path="@context.Item.FilenamePath" />
+                                                        <MudButton Size="Size.Small" Variant="Variant.Outlined"  Color="Color.Primary" OnClick="@(() => OpenDetailsAsync(context.Item, run.JSDirectoryId))">
+                                                            Details
+                                                        </MudButton>
+                                                    </MudCardContent>
+
+                                                </MudCard>
+                                            </CellTemplate>
+                                        </TemplateColumn>
+                                    </Columns>
+                                    <PagerContent>
+                                        <MudDataGridPager T="Result" PageSizeOptions="new int[] {10, 25, 50}" />
+                                    </PagerContent>
+                                </MudDataGrid>                           
+                            }
+                            else
+                            {
+                                <MudText>No issues to display.</MudText>
+                            }                            
+                        </MudTabPanel>                          
+                    }               
+                </MudTabs>
+            </MudItem>
+        </MudGrid>        
+    </MudPaper>
+}
+
+@code {
+    private bool IsGrouped { get; set; } = false;
+    private MudDataGrid<Result> dataGrid;
+
+    private IReadOnlyCollection<string> _selectedSeverity;
+    private IEnumerable<RuleWithCount> _selectedRules;
+
+    private bool FilterBySeverityAndRule(Result result)
+    {
+        // filter by severity
+        bool rowVisible = _selectedSeverity.Contains(result.Level);
+        // filter by only selected rule (empty selection is treated as All rules selected)
+        if (_selectedRules != null && _selectedRules.Count() > 0)
+        { 
+            rowVisible &= _selectedRules.Select(r => r.Rule.Id).Contains(result.RuleId);
+        }
+        return rowVisible;
+    }
+
+    private Color GetAvatarColor(string level)
+    {
+        return level?.ToLower() switch
+        {
+            "error" => Color.Error,     
+            "warning" => Color.Warning,  
+            "note" => Color.Info,     
+            _ => Color.Warning
+        };
+    }
+
+    private string GetAvatarText(string level)
+    {
+        return level?.ToLower() switch
+        {
+            "error" => "H",      
+            "warning" => "M",    
+            "note" => "L",       
+            _ => "M"      
+        };
+    }
+
+    private void RulesSelectedValuesChanged(IEnumerable<RuleWithCount> rules)
+    {
+        _selectedRules = rules;
+    }
+
+    private void SeveritySelectionChanged(IReadOnlyCollection<string> selectedValues)
+    {
+        _selectedSeverity = selectedValues;
+    }
+
+    private IEnumerable<SarifFile> selectedFiles { get; set; }
+    private List<string> selectedItems = new();
+    private List<Run> CombinedRuns = new();
+    private string _mudTextSourceCode = "Please add source code for the folder.";
+
+    private string GetMultiSelectionText(List<string> selectedValues)
+    {
+        //return $"Selected SARIF file{(selectedValues.Count > 1 ? "s" : "")}: {string.Join(", ", selectedValues.Select(x => x))}";
+        return $"{selectedValues.Count} SARIF file{(selectedValues.Count > 1 ? "s have" : " has")} been selected";
+    }
+
+    private string GetMultiSelectionRuleText(List<string> selectedValues)
+    {
+
+        if (selectedValues.Count == 0)
+        {
+            return "All rules selected";
+        }
+        else
+        {
+            return $"{selectedValues.Count} Rule{(selectedValues.Count > 1 ? "s" : "")} selected";
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        selectedFiles = SarifFileService.AllFiles;
+    }
+
+    private void OnTabActivated()
+    {
+        // reset selected rules
+        _selectedRules = null;
+    }
+
+
+    private IBrowserFile sarifFile;
+    private bool showFileList = false; // Toggle to display the list of files
+    private ElementReference directoryInput;
+    private SarifFile mySarif;
+
+    private DirectoryPickerResult directoryPickerResult;
+    private string directoryName;
+
+    private Task OpenDetailsAsync(Result result, int  jsDirectoryId)
+    {
+        var parameters = new DialogParameters<FullDetailsDialog>()
+        {
+            { x => x.Result, result }, 
+            { i => i.JSDirectoryId, jsDirectoryId }
+        };
+        DialogOptions options = new() { FullScreen = true, CloseButton = true, CloseOnEscapeKey=true };
+
+        return DialogService.ShowAsync<FullDetailsDialog>("Full Details", parameters, options);
+    }
+
+    private async Task AddCodeSnippetsAsync(Run run)
+    {
+        if (run.JSDirectoryId == 0 && !LocalFilesService.AllDirectories.Any())
+        {
+            Snackbar.Add("No Source Code Folder Selected", Severity.Error);
+        }
+        else if (run.JSDirectoryId == 0)
+        {
+            try
+            {
+                foreach (var result in run.Results)
+                {
+                    if (result.Locations.Any())
+                    {
+                        var normalizedPath = FileHelper.NormalizePath(result.FilenamePath);
+
+                        string error;
+                        string content;
+                        var (adjustedPath, matchedFolder) = FileHelper.AdjustPathToGrantedFolder(normalizedPath, LocalFilesService.AllDirectories, out error);
+                        if (adjustedPath == null || matchedFolder == null)
+                        {    
+                            Snackbar.Add(error, Severity.Error);
+                            break;                           
+                        }
+                        else
+                        {
+                            // Assign the matched folder's Id to the run
+                            run.JSDirectoryId = matchedFolder.Id;
+
+                            // save adjusted path for furure references
+                            result.FilenamePath = adjustedPath;
+
+                            content = await JSInteropService.ReadFileContentAsync(run.JSDirectoryId, adjustedPath);
+                            if (content == null || content == "")
+                            {
+                                Snackbar.Add($"Unable to read {result.FilenamePath}");
+                                break;
+                            }
+                        }
+
+                        var region = result.Locations[0].PhysicalLocation.Region;
+                        var res = SnippetHelper.ExtractCodeSnippet(content, region.StartLine, region.StartColumn, region.EndLine, region.EndColumn);
+
+                        result.Locations[0].PhysicalLocation.ExtractedCodeSnippet = res;
+
+                        // Notify UI of changes after each snippet is added
+                        await InvokeAsync(StateHasChanged);
+                    }
+                }   
+            }
+            catch (Exception ex)
+            {
+                Snackbar.Add(ex.Message, Severity.Error);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+
+}

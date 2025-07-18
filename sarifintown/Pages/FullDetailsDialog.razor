@@ -1,0 +1,480 @@
+﻿@using Sarifintown.Helpers
+@using Sarifintown.Models
+@using Sarifintown.Services
+@using System.Text
+@using static Sarifintown.Models.Region
+
+@inject SarifFileService SarifFileService
+@inject JSInteropService JSInteropService
+@inject IJSRuntime JS
+@inject SettingsService SettingsService
+@inject ISnackbar Snackbar
+@inject LocalFilesService LocalFilesService
+
+<MudDialog>
+    <DialogContent>
+        <MudPaper Class="d-flex align-items-center">
+            <MudTextField Value="@Result.RuleId" Label="Rule ID" ReadOnly="true" />   
+        </MudPaper>
+        @if (Result.CodeFlows == null || Result.CodeFlows.Count == 0)
+        {
+            <MudText Typo="Typo.h6" Color="Color.Warning">No code flows available for this issue</MudText>            
+        }
+        else
+        {
+            @if (SettingsService.ResultViewMode == ResultViewMode.SingleWindow)
+            {
+                
+
+                <MudGrid>
+                    <MudItem xs="4">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            <MudList T="MethodHighlightResult" Color="Color.Primary">
+                                @foreach (var methodResult in _methodResultList.OrderBy(l => l.Id))
+                                {
+                                    <MudListItem @onclick="(() => SetFocusOnRight(methodResult))">
+                                        <MudText Typo="Typo.button" HtmlTag="strong" Color="@(methodResult.Id == focusedItemId ? Color.Primary : Color.Default)">Location ID: @methodResult.Id</MudText>
+
+                                        <MudText>
+                                            @methodResult.SarifRegion.StartLine:
+                                            <MudHighlighter Class="mud-primary-text" Style="background-color:transparent;font-weight:bold" Text="@methodResult.SarifRegion.StartLine.ToString()" HighlightedText="@methodResult.SarifRegion.Snippet?.Text" />
+                                        </MudText>
+
+                                    </MudListItem>
+                                }
+                            </MudList>
+                        </MudPaper>
+                    </MudItem>
+
+                
+                    <MudItem xs="8">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            @foreach (var methodResult in _methodResultList.OrderBy(l => l.Id))
+                            {
+                                <MudFocusTrap Disabled="methodResult.Id != focusedItemId" DefaultFocus="DefaultFocus.FirstChild">
+                                    <MudCard @onclick="() => SetFocusOnLeft(methodResult)">
+                                        <MudCardContent>
+                                            <MudBadge Color="@(methodResult.Id == focusedItemId ? Color.Primary : Color.Transparent)" Origin="Origin.TopLeft">
+                                                <FormattedPath Path="@methodResult.Filename" />
+                                            </MudBadge>
+                                            <CodeBlock 
+                                            Language="@methodResult.FilenameExt"
+                                            CodeContent="@methodResult.ExtractedSnippet.ContextSnippet"
+                                            HighlightedLines=@methodResult.SarifRegion.StartLine.ToString()
+                                            StartLineNumber=@methodResult.SarifRegion.StartLine
+                                            SplitWindowMode=true
+                                            SingleWindowMode=true />
+                                        </MudCardContent>
+                                    </MudCard>
+                                </MudFocusTrap>
+                            }
+                        </MudPaper>
+
+                    </MudItem>
+                </MudGrid>
+                @*
+                <MudGrid>
+                    <MudItem xs="4">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            <MudList T="CodeFlowData" Color="Color.Primary">
+                                @foreach (var codeFlowData in _codeFlowDataList2.OrderBy(l => l.Id))
+                                {
+                                    <MudListItem @onclick="(() => SetFocusOnRight(codeFlowData))">
+                                        <MudText Typo="Typo.button" HtmlTag="strong" Color="@(codeFlowData.Id == focusedItemId ? Color.Primary : Color.Default)">Location ID: @codeFlowData.Id</MudText>
+
+                                        <MudText>
+                                            @codeFlowData.ExtractedSnippet.StartLine:
+                                            <MudHighlighter Class="mud-primary-text" Style="background-color:transparent;font-weight:bold" Text="@codeFlowData.ExtractedSnippet.LineSnippet" HighlightedText="@codeFlowData.ExtractedSnippet.Snippet" />
+                                        </MudText>
+
+                                    </MudListItem>
+                                }
+                            </MudList>
+                        </MudPaper>
+                    </MudItem>
+
+                    <MudItem xs="8">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            @foreach (var codeFlowData in _codeFlowDataList2.OrderBy(l => l.Id))
+                            {
+                                <MudFocusTrap Disabled="codeFlowData.Id != focusedItemId" DefaultFocus="DefaultFocus.FirstChild">
+                                    <MudCard @key="codeFlowData.Id" @onclick="() => SetFocusOnLeft(codeFlowData)">
+                                        <MudCardContent>
+                                            <MudBadge Color="@(codeFlowData.Id == focusedItemId ? Color.Primary : Color.Transparent)" Origin="Origin.TopLeft">
+                                                <FormattedPath Path="@codeFlowData.Filename" />
+                                            </MudBadge>
+                                            <CodeBlock Language="@codeFlowData.FilenameExt"
+                                            CodeContent="@codeFlowData.ExtractedSnippet.ContextSnippet"
+                                            HighlightedLines=@codeFlowData.ExtractedSnippet.StartLine.ToString()
+                                            StartLineNumber=@codeFlowData.ExtractedSnippet.VisibleStartLine
+                                            FullDetailsDialogMode=true />
+                                        </MudCardContent>
+                                    </MudCard>
+                                </MudFocusTrap>
+                            }
+                        </MudPaper>
+
+                    </MudItem>
+                </MudGrid>
+                *@
+            }
+            else if (SettingsService.ResultViewMode == ResultViewMode.SplitMode)
+            {
+                <MudGrid >
+                    <MudItem xs="4">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            <MudList T="CodeFlowData" Color="Color.Primary">
+                                @foreach (var codeFlowData in _codeFlowDataList.OrderBy(l => l.Id))
+                                {
+                                    <MudListItem @onclick="(() => SetFocusOnRight(codeFlowData))">
+                                        <MudText Typo="Typo.button" HtmlTag="strong" Color="@(codeFlowData.Id == focusedItemId ? Color.Primary : Color.Default)">Location ID: @codeFlowData.Id</MudText>
+
+                                        <MudText>
+                                            @codeFlowData.ExtractedSnippet.StartLine:
+                                            <MudHighlighter Class="mud-primary-text" Style="background-color:transparent;font-weight:bold" Text="@codeFlowData.ExtractedSnippet.LineSnippet" HighlightedText="@codeFlowData.ExtractedSnippet.Snippet" />
+                                        </MudText>
+
+                                    </MudListItem>
+                                }
+                            </MudList>
+                        </MudPaper>
+                    </MudItem>
+
+                    <MudItem xs="8">
+                        <MudPaper Class="d-flex flex-column overflow-x-auto pa-2" Height="86vh">
+                            @foreach (var codeFlowData in _codeFlowDataList.OrderBy(l => l.Id))
+                            {
+                                <MudFocusTrap Disabled="codeFlowData.Id != focusedItemId" DefaultFocus="DefaultFocus.FirstChild">
+                                    <MudCard @key="codeFlowData.Id" @onclick="() => SetFocusOnLeft(codeFlowData)" >
+                                        <MudCardContent>
+                                            <MudBadge Color="@(codeFlowData.Id == focusedItemId ? Color.Primary : Color.Transparent)" Origin="Origin.TopLeft">
+                                                <FormattedPath Path="@codeFlowData.Filename" />
+                                            </MudBadge>
+                                            <CodeBlock 
+                                            Language="@codeFlowData.FilenameExt"
+                                            CodeContent="@codeFlowData.ExtractedSnippet.ContextSnippet"
+                                            HighlightedLines=@codeFlowData.ExtractedSnippet.StartLine.ToString()
+                                            StartLineNumber=@codeFlowData.ExtractedSnippet.VisibleStartLine
+                                            SplitWindowMode=true                                        
+                                            />
+                                        </MudCardContent>
+                                    </MudCard>
+                                </MudFocusTrap>
+                            }
+                        </MudPaper>
+
+                    </MudItem>
+                </MudGrid>
+            }
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton Color="Color.Primary" OnClick="Submit">Close</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; }
+
+    [Parameter]
+    public Result Result { get; set; } = new Result();
+
+    [Parameter]
+    public int JSDirectoryId { get; set; }
+
+    List<CodeFlowData> _codeFlowDataList = new List<CodeFlowData>();
+    List<MethodHighlightResult> _methodResultList = new List<MethodHighlightResult>();
+    Dictionary<string, string> _usedFiles = new Dictionary<string, string>();
+
+
+    private int focusedItemId = 0;
+    private bool _isTreeSitterInitialized = false;
+
+    private void SetFocusOnRight(CodeFlowData codeFlowData)
+    {
+        focusedItemId = codeFlowData.Id;
+    }
+
+    private void SetFocusOnRight(MethodHighlightResult methodResult)
+    {
+        focusedItemId = methodResult.Id;
+    }
+
+    private void SetFocusOnLeft(CodeFlowData codeFlowData)
+    {
+        focusedItemId = codeFlowData.Id;
+    }
+
+    private void SetFocusOnLeft(MethodHighlightResult methodResult)
+    {
+        focusedItemId = methodResult.Id;
+    }
+
+    private void Submit() => MudDialog.Close(DialogResult.Ok(true));
+
+    protected override async Task OnInitializedAsync()
+    {
+        PrepareCodeResults();
+
+        var fileNames = _codeFlowDataList.Select(cf => cf.Filename).Distinct().ToList();
+        foreach (var filename in fileNames)
+        {
+            var fileContent = await JSInteropService.ReadFileContentAsync(JSDirectoryId, filename);
+            _usedFiles.Add(filename, fileContent);
+        }
+
+        if (SettingsService.ResultViewMode == ResultViewMode.SplitMode)
+        {
+            foreach (var codeFlowItem in _codeFlowDataList)
+            {
+                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(_usedFiles[codeFlowItem.Filename], codeFlowItem.Region);
+            }
+        }
+        else if (SettingsService.ResultViewMode == ResultViewMode.SingleWindow)
+        {
+
+            foreach (var codeFlowItem in _codeFlowDataList)
+            {                
+                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(_usedFiles[codeFlowItem.Filename], codeFlowItem.Region);
+
+            }
+
+            string output;
+            try
+            {
+                // Initialize Tree-sitter Web Worker
+                await JS.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
+                output = "Tree-sitter worker initialized successfully.";
+                _isTreeSitterInitialized = true;
+                Snackbar.Add($"{output}", Severity.Success);
+            }
+            catch (Exception ex)
+            {
+                output = $"Initialization Error: {ex.Message}";
+                Snackbar.Add($"{output}", Severity.Error);
+            }          
+
+            foreach (var codeFlowItem in _codeFlowDataList)
+            {
+                int internalId = 0;
+                var language = TreeSitterLanguageHelper.GetLanguageByExtension(codeFlowItem.FilenameExt);
+                var methodExtractionResult = await JS.InvokeAsync<MethodExtractionResult>("TreeSitterInterop.extractMethodBySnippetPosition",
+                                                _usedFiles[codeFlowItem.Filename], // source code
+                                                language,
+                                                codeFlowItem.Region.StartLine,
+                                                codeFlowItem.Region.StartColumn,
+                                                codeFlowItem.Region.EndColumn,
+                                                true);
+
+                if (methodExtractionResult.IsFound)
+                {
+                    var existingMethod = _methodResultList.FirstOrDefault(m => m.SarifRegion.Equals(methodExtractionResult.SarifRegion));
+
+                    if (existingMethod != null && !existingMethod.HighlightLines.Contains(codeFlowItem.Region.StartLine))
+                    {
+                        existingMethod.HighlightLines.Add(codeFlowItem.Region.StartLine);
+                        existingMethod.CodeFlowDataIds.Add(codeFlowItem.Id);
+                    }
+                    else
+                    {
+                        var newMethodHighlightResult = new MethodHighlightResult
+                            {
+                                Id = internalId,
+                                Filename = codeFlowItem.Filename,
+                                FilenameExt = codeFlowItem.FilenameExt,
+                                ExtractedSnippet = new ExtractedCodeSnippet()
+                                {
+                                    ContextSnippet = methodExtractionResult.MethodCode,
+                                    LineSnippet = methodExtractionResult.SarifRegion.StartLine.ToString(),
+                                    EndLine = methodExtractionResult.SarifRegion.EndLine,
+                                    Snippet = methodExtractionResult.SarifRegion.Snippet != null ? methodExtractionResult.SarifRegion.Snippet.Text : null,
+                                    StartLine = methodExtractionResult.SarifRegion.StartLine,
+                                    VisibleEndLine = methodExtractionResult.SarifRegion.EndLine,
+                                    VisibleStartLine = methodExtractionResult.SarifRegion.StartLine
+                                },
+                                SarifRegion = new Region
+                                {
+                                    StartLine = methodExtractionResult.SarifRegion.StartLine,
+                                    EndLine = methodExtractionResult.SarifRegion.EndLine,
+                                    StartColumn = methodExtractionResult.SarifRegion.StartColumn,
+                                    EndColumn = methodExtractionResult.SarifRegion.EndColumn,
+                                    Snippet = methodExtractionResult.SarifRegion.Snippet != null ? new RegionSnippet
+                                    {
+                                        Text = methodExtractionResult.SarifRegion.Snippet.Text
+                                    } : null
+                                },
+                                CodeFlowDataIds = new List<int> { codeFlowItem.Id },
+                                HighlightLines = new List<int> { codeFlowItem.Region.StartLine }
+                            };
+
+                        _methodResultList.Add(newMethodHighlightResult);
+                        internalId++;
+
+                        /*
+                        codeFlowItem.ExtractedSnippet = new ExtractedCodeSnippet()
+                        {
+                            ContextSnippet = methodExtractionResult.MethodCode,
+                            LineSnippet = codeFlowItem.ExtractedSnippet.LineSnippet,
+                            EndLine = methodExtractionResult.SarifRegion.EndLine,   
+                            Snippet = codeFlowItem.ExtractedSnippet.Snippet,
+                            StartLine = methodExtractionResult.SarifRegion.StartLine,   
+                            VisibleEndLine = methodExtractionResult.SarifRegion.EndLine,
+                            VisibleStartLine = methodExtractionResult.SarifRegion.StartLine
+                            };
+                        codeFlowItem.Region = methodExtractionResult.SarifRegion;\
+                        */
+                    }
+                }
+            }
+
+
+
+        }
+
+
+
+    }
+
+
+    public static string HighlightSnippet(string fileContent, Region region)
+    {
+        var result = new StringBuilder();
+        int currentLine = 1;
+        int currentColumn = 1;
+        bool withinRegion = false;
+
+        for (int i = 0; i < fileContent.Length; i++)
+        {
+            char currentChar = fileContent[i];
+
+            if (currentLine == region.StartLine && currentColumn == region.StartColumn && !withinRegion)
+            {
+                // Start highlighting
+                result.Append("<mark>");
+                withinRegion = true;
+            }
+
+            if (currentLine == region.EndLine && currentColumn == region.EndColumn && withinRegion)
+            {
+                // End highlighting
+                result.Append("</mark>");
+                withinRegion = false;
+            }
+
+            result.Append(currentChar);
+
+            // Handle both Windows and Linux line endings
+            if (currentChar == '\r' && i + 1 < fileContent.Length && fileContent[i + 1] == '\n')
+            {
+                // Windows newline
+                currentLine++;
+                currentColumn = 1;
+                i++; // Skip the '\n' part of the Windows newline
+                result.Append('\n'); // Normalize to '\n' in the result
+            }
+            else if (currentChar == '\n')
+            {
+                // Linux newline
+                currentLine++;
+                currentColumn = 1;
+            }
+            else
+            {
+                currentColumn++;
+            }
+        }
+
+        // If we are still within the region at the end of the loop, close the mark tag
+        if (withinRegion)
+        {
+            result.Append("</mark>");
+        }
+
+        return result.ToString();
+    }
+
+    public void PrepareCodeResults()
+    {
+        _codeFlowDataList = new List<CodeFlowData>();
+        _methodResultList = new List<MethodHighlightResult>();
+
+        var fileRegionTracker = new Dictionary<string, List<CodeFlowData>>();
+
+        if (JSDirectoryId == 0)
+        {
+            // 0 = User didn't select and grant access to the folder
+            return;
+        }
+
+        if (Result.CodeFlows != null && Result.CodeFlows.Count > 0 && Result.CodeFlows[0].ThreadFlows.Count > 0)
+        {
+            // Assume we will have a single set of locations
+            foreach (var threadFlowLocation in Result.CodeFlows[0].ThreadFlows[0].Locations)
+            {
+                var location = threadFlowLocation.Location;
+                if (location?.PhysicalLocation != null)
+                {
+                    var region = location.PhysicalLocation.Region;
+                    if (region == null) 
+                        continue;
+
+                    var normalizedPathForPhysicalLocation = FileHelper.NormalizePath(location.PhysicalLocation.ArtifactLocation.Uri);
+
+                    string error;
+                    var (adjustedPath, matchedFolder) = FileHelper.AdjustPathToGrantedFolder(normalizedPathForPhysicalLocation, LocalFilesService.AllDirectories, out error);
+
+                    // string filePath = location.PhysicalLocation.ArtifactLocation.Uri;
+                    if (error != null)
+                    {
+                        // handle error logic
+                    }
+                    string filePath = adjustedPath;
+
+                    if (!fileRegionTracker.ContainsKey(filePath))
+                    {
+                        fileRegionTracker[filePath] = new List<CodeFlowData>();
+                    }
+
+                    var existingData = fileRegionTracker[filePath]
+                        .FirstOrDefault(data => data.Region.StartLine == region.StartLine && data.Region.EndLine == region.EndLine);
+
+                    if (existingData != null)
+                    {
+                        ExpandRegionColumns(existingData.Region, region);
+                    }
+                    else
+                    {
+                        var id = threadFlowLocation.Location.Id;
+
+                        var newCodeFlowData = new CodeFlowData
+                        {
+                            Id = id,
+                            Filename = filePath,
+                            FilenameExt = Path.GetExtension(filePath).TrimStart('.'),
+                            Region = new Region
+                            {
+                                StartLine = region.StartLine,
+                                EndLine = region.EndLine,
+                                StartColumn = region.StartColumn,
+                                EndColumn = region.EndColumn
+                            }
+                        };
+
+                        _codeFlowDataList.Add(newCodeFlowData);
+
+                        fileRegionTracker[filePath].Add(newCodeFlowData);
+                    }
+                }
+            }
+        }
+
+        // method to expand the column range of an existing region
+        void ExpandRegionColumns(Region existingRegion, Region newRegion)
+        {
+            existingRegion.StartColumn = Math.Min(existingRegion.StartColumn, newRegion.StartColumn);
+            existingRegion.EndColumn = Math.Max(existingRegion.EndColumn, newRegion.EndColumn);
+        }
+    }
+}
+

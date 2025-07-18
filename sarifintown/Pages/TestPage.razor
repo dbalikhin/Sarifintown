@@ -1,0 +1,102 @@
+﻿#if DEBUG
+@page "/testpage"
+
+@using MudBlazor
+@inherits LayoutComponentBase
+@inject IJSRuntime JS
+
+@using Microsoft.JSInterop
+
+<h1>Tree-Sitter JavaScript Parser Test</h1>
+<button @onclick="ParseJavaScriptCode" disabled="@isLoading">Parse Code</button>
+
+<button @onclick="ExtractMethod" disabled="@isLoading">ExtractMethod</button>
+
+<pre>@output</pre>
+
+@code {
+    private string output = string.Empty;
+    private bool isLoading = false;
+    private bool isInitialized = false;
+
+    private string ExtractedMethod = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        isLoading = true;
+        try
+        {
+            // Initialize Tree-sitter Web Worker
+            await JS.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
+            output = "Tree-sitter worker initialized successfully.";
+            isInitialized = true;
+        }
+        catch (JSException jsEx)
+        {
+            output = $"Initialization JS Error: {jsEx.Message}";
+        }
+        catch (Exception ex)
+        {
+            output = $"Initialization Error: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task ParseJavaScriptCode()
+    {
+        if (!isInitialized)
+        {
+            output = "Tree-sitter is not initialized.";
+            return;
+        }
+
+        isLoading = true;
+        output = string.Empty;
+        try
+        {
+            // Sample source code to parse
+            //string sourceCode = "let x = 1; console.log(x);";
+            string sourceCode = @"";
+            string language = "csharp";
+            // Call the JS function to parse the code
+            string parseTree = await JS.InvokeAsync<string>("TreeSitterInterop.parseCode", sourceCode, language);
+
+            // Display the parse tree
+            output = parseTree;
+        }
+        catch (JSException jsEx)
+        {
+            output = $"JS Error: {jsEx.Message}";
+        }
+        catch (Exception ex)
+        {
+            output = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task ExtractMethod()
+    {
+        string sourceCode = @"";
+
+        int line = 58;//19; 
+        int startColumn = 17;// 22;
+        int endColumn = 28; // 32;
+        string language = "csharp";
+
+
+        
+        var method = await JS.InvokeAsync<string>("TreeSitterInterop.extractMethodBySnippetPosition", sourceCode, language, line, startColumn, endColumn, false);
+        ExtractedMethod = method ?? "Method not found.";
+
+        output = ExtractedMethod;
+    }   
+}
+
+#endif

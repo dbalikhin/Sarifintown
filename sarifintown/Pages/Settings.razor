@@ -1,0 +1,22 @@
+﻿@page "/settings"
+@using MudBlazor
+@using Sarifintown.Services
+@inherits LayoutComponentBase
+
+@inject SettingsService SettingsService
+
+<h3>Settings</h3>
+
+<MudSelect @bind-Value="SettingsService.ResultViewMode" HelperText="Details mode">
+    @foreach (ResultViewMode mode in Enum.GetValues(typeof(ResultViewMode)))
+    {
+        <MudSelectItem Value="@mode">@mode</MudSelectItem>
+    }
+</MudSelect>
+
+<MudText Color="Color.Warning"> SingleWindow mode: Work in Progress.</MudText>
+
+
+@code {
+
+}
