@@ -13,7 +13,7 @@ Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysi
 - Uses Browser File System API to read source code files (read-only access)
 - Import SARIF files via drag-and-drop or file picker.
 - Extract and highlight code snippets for each finding with PrismJS.
-- Show full code flows via 
+- Show full code flows 
 - Responsive UI built with MudBlazor.
 - Group and filter results by severity, rule and file path.
 
@@ -37,7 +37,7 @@ Under development: Extract the whole methods with Tree-sitter WASM grammars to i
    View findings grouped by severity and rule. Add code snippets via the Button. Inspect extracted code snippets.
 
 4. **Full Details Analysis**
-If a SARIF file contains the code flow, you can view code threads and highlights using Tree-sitter grammars.
+   If a SARIF file contains the code flow, you can view code threads and highlights using Tree-sitter grammars.
 
 ## License
 
