@@ -32,6 +32,13 @@
 
 
     <script src="_framework/blazor.webassembly.js"></script>
+    <script>
+        window.scrollToBottom = (element) => {
+            if (element) {
+                element.scrollTop = element.scrollHeight;
+            }
+        };
+    </script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
     <script src="/js/prism-all.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.27.0/components/prism-xml.min.js"></script>
