@@ -41,8 +41,8 @@ namespace Sarifintown.Services
                     // use default settings if nothing is stored
                     Settings = new AiSettings
                     {
-                        ModelId = "phi4",
-                        Endpoint = "http://localhost:5273/v1",
+                        ModelId = "deepseek-r1-distill-qwen-14b",
+                        Endpoint = "http://localhost:5333/v1",
                         ApiKey = "NOTREQUIREDFORLOCALMODEL",
                     };
                 }
@@ -120,8 +120,8 @@ namespace Sarifintown.Services
     // Data class for AI settings
     public class AiSettings
     {
-        public string ModelId { get; set; } = "phi4";
-        public string Endpoint { get; set; } = "http://localhost:5273/v1";
+        public string ModelId { get; set; } = "deepseek-r1-distill-qwen-14b";
+        public string Endpoint { get; set; } = "http://localhost:5333/v1"; 
         public string? ApiKey { get; set; } = "NOTREQUIREDFORLOCALMODEL";
     }
 
