@@ -81,7 +81,7 @@
     private bool _showSettings;
     private AiSettings _editSettings = new();
     private bool _shouldScrollToBottom;
-    private Timer? _renderTimer; // Timer to decouple UI updates from the stream loop
+    private Timer? _renderTimer;
 
     protected override void OnInitialized()
     {
@@ -94,7 +94,6 @@
             _displayMessages.Add(assistantMessage);
         }
 
-        // Initialize a timer to periodically update the UI. It's created in a disabled state.
         _renderTimer = new Timer(_ => InvokeAsync(StateHasChanged), null, Timeout.Infinite, Timeout.Infinite);
     }
 
@@ -164,25 +163,28 @@
         _shouldScrollToBottom = true;
         StateHasChanged();
 
+        var assistantResponseBuilder = new StringBuilder();
+
         try
         {
-            var settings = new OpenAIPromptExecutionSettings() { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions };
+            var settings = new OpenAIPromptExecutionSettings { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions };
 
             var assistantMessagePlaceholder = new ChatMessageContent(AuthorRole.Assistant, string.Empty);
             _displayMessages.Add(assistantMessagePlaceholder);
 
-            var assistantResponseBuilder = new StringBuilder();
+            
 
-            // Start the timer to refresh the UI every 100ms for a smooth streaming effect.
             _renderTimer?.Change(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
 
-            var streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(
+            IAsyncEnumerable<StreamingChatMessageContent> streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(
                 _chatHistory,
                 executionSettings: settings,
                 kernel: KernelService.Kernel);
 
-            await foreach (var content in streamingResult)
+            await foreach (StreamingChatMessageContent content in streamingResult)
             {
+                // In auto-invocation mode, we only need to concern ourselves with the text content for the UI.
+                // The kernel handles the function call lifecycle in the background.
                 if (content.Content is not null)
                 {
                     assistantResponseBuilder.Append(content.Content);
@@ -191,7 +193,8 @@
                 }
             }
 
-            _displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
+            // Update the display list with the final, complete message content.
+            //_displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
         }
         catch (Exception ex)
         {
@@ -199,9 +202,9 @@
         }
         finally
         {
-            // Stop the timer and perform a final render to ensure UI is up to date.
             _renderTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _isAwaitingResponse = false;
+            _displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
             StateHasChanged();
         }
     }
@@ -221,6 +224,6 @@
     public void Dispose()
     {
         KernelService.OnChange -= OnKernelServiceChanged;
-        _renderTimer?.Dispose(); // Ensure the timer is disposed with the component.
+        _renderTimer?.Dispose();
     }
 }
