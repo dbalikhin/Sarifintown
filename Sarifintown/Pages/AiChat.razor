@@ -1,0 +1,229 @@
+﻿@page "/aichat"
+@using Microsoft.SemanticKernel
+@using Microsoft.SemanticKernel.ChatCompletion
+@using Microsoft.SemanticKernel.Connectors.OpenAI
+@using MudBlazor
+@using System.Text
+@using System.Threading
+@using Sarifintown.Services
+@inject KernelService KernelService
+@inject IJSRuntime JSRuntime
+@implements IDisposable
+
+<MudContainer MaxWidth="MaxWidth.Medium" Class="mt-4">
+    <MudPaper Elevation="3">
+        <MudToolBar>
+            <MudText Typo="Typo.h6">Local &amp; Cloud AI Chat</MudText>
+            <MudSpacer />
+            <MudIconButton Icon="@Icons.Material.Filled.Settings" OnClick="ToggleSettings" />
+        </MudToolBar>
+
+        <MudCollapse Expanded="_showSettings">
+            <MudPaper Class="pa-4" Elevation="0">
+                <MudText Typo="Typo.h6" GutterBottom="true">AI Settings</MudText>
+                <MudText Typo="Typo.body2" Class="mb-4">
+                    Your settings are saved securely in your browser's local storage and are never sent to any server.
+                </MudText>
+                <MudTextField @bind-Value="_editSettings.ModelId" Label="Model ID" Variant="Variant.Outlined" Margin="Margin.Dense" />
+                <MudTextField @bind-Value="_editSettings.Endpoint" Label="API Endpoint" Variant="Variant.Outlined" Margin="Margin.Dense" />
+                <MudTextField @bind-Value="_editSettings.ApiKey" Label="API Key (Optional)" HelperText="Required for cloud services like OpenAI." Variant="Variant.Outlined" Margin="Margin.Dense" InputType="InputType.Password" />
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveSettingsAsync" Class="mt-4">Save and Reconnect</MudButton>
+            </MudPaper>
+        </MudCollapse>
+
+        @if (!KernelService.IsInitialized)
+        {
+            <MudAlert Severity="Severity.Warning" Class="ma-4">
+                AI Service is not configured. Please open the settings panel and save your configuration.
+            </MudAlert>
+        }
+        else
+        {
+            <div class="pa-4" style="height: 500px; overflow-y: auto;" id="chatContainer" @ref="_chatContainer">
+                <MudStack Spacing="2">
+                    @foreach (var message in _displayMessages)
+                    {
+                        <div class="d-flex @(message.Role == AuthorRole.User ? "flex-row-reverse" : "")">
+                            <MudPaper Class="pa-3" Elevation="2" Style="@(message.Role == AuthorRole.User ? "background-color: var(--mud-palette-primary); color: white;" : "")">
+                                <MudText Typo="Typo.body1">@((MarkupString)message.Content)</MudText>
+                            </MudPaper>
+                        </div>
+                    }
+                    @if (_isAwaitingResponse)
+                    {
+                        <div class="d-flex mt-2">
+                            <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+                        </div>
+                    }
+                </MudStack>
+            </div>
+
+            <MudPaper Elevation="2" Class="pa-2">
+                <MudTextField @bind-Value="_userInput"
+                              Placeholder="Ask me anything..."
+                              Variant="Variant.Outlined"
+                              @onkeydown="HandleKeyDown"
+                              Adornment="Adornment.End"
+                              AdornmentIcon="@Icons.Material.Filled.Send"
+                              OnAdornmentClick="SendMessageAsync"
+                              Disabled="_isAwaitingResponse" />
+            </MudPaper>
+        }
+    </MudPaper>
+</MudContainer>
+
+@code {
+    private readonly ChatHistory _chatHistory = new("You are a helpful AI assistant.");
+    private readonly List<ChatMessageContent> _displayMessages = new();
+    private string _userInput = string.Empty;
+    private bool _isAwaitingResponse;
+    private ElementReference _chatContainer;
+    private bool _showSettings;
+    private AiSettings _editSettings = new();
+    private bool _shouldScrollToBottom;
+    private Timer? _renderTimer;
+
+    protected override void OnInitialized()
+    {
+        KernelService.OnChange += OnKernelServiceChanged;
+
+        if (KernelService.IsInitialized && !_chatHistory.Any())
+        {
+            var assistantMessage = new ChatMessageContent(AuthorRole.Assistant, "Hello! I'm ready to chat. How can I help?");
+            _chatHistory.Add(assistantMessage);
+            _displayMessages.Add(assistantMessage);
+        }
+
+        _renderTimer = new Timer(_ => InvokeAsync(StateHasChanged), null, Timeout.Infinite, Timeout.Infinite);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_shouldScrollToBottom)
+        {
+            _shouldScrollToBottom = false;
+            await ScrollToBottomAsync();
+        }
+    }
+
+    private void OnKernelServiceChanged() => InvokeAsync(StateHasChanged);
+
+    private void ToggleSettings()
+    {
+        if (!_showSettings)
+        {
+            _editSettings = new AiSettings
+            {
+                ModelId = KernelService.Settings.ModelId,
+                Endpoint = KernelService.Settings.Endpoint,
+                ApiKey = KernelService.Settings.ApiKey
+            };
+        }
+        _showSettings = !_showSettings;
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        _showSettings = false;
+        await KernelService.SaveSettingsAndReloadAsync(_editSettings);
+
+        if (KernelService.IsInitialized)
+        {
+            _chatHistory.Clear();
+            _displayMessages.Clear();
+
+            var assistantMessage = new ChatMessageContent(AuthorRole.Assistant, "Service reconfigured! How can I help?");
+            _chatHistory.Add(assistantMessage);
+            _displayMessages.Add(assistantMessage);
+        }
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SendMessageAsync();
+        }
+    }
+
+    private async Task SendMessageAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_userInput) || _isAwaitingResponse || !KernelService.IsInitialized || KernelService.ChatCompletionService == null || KernelService.Kernel == null)
+        {
+            return;
+        }
+
+        _isAwaitingResponse = true;
+
+        var userMessage = new ChatMessageContent(AuthorRole.User, _userInput);
+        _chatHistory.Add(userMessage);
+        _displayMessages.Add(userMessage);
+
+        _userInput = string.Empty;
+        _shouldScrollToBottom = true;
+        StateHasChanged();
+
+        var assistantResponseBuilder = new StringBuilder();
+
+        try
+        {
+            var settings = new OpenAIPromptExecutionSettings { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions };
+
+            var assistantMessagePlaceholder = new ChatMessageContent(AuthorRole.Assistant, string.Empty);
+            _displayMessages.Add(assistantMessagePlaceholder);
+
+            
+
+            _renderTimer?.Change(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
+
+            IAsyncEnumerable<StreamingChatMessageContent> streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(
+                _chatHistory,
+                executionSettings: settings,
+                kernel: KernelService.Kernel);
+
+            await foreach (StreamingChatMessageContent content in streamingResult)
+            {
+                // In auto-invocation mode, we only need to concern ourselves with the text content for the UI.
+                // The kernel handles the function call lifecycle in the background.
+                if (content.Content is not null)
+                {
+                    assistantResponseBuilder.Append(content.Content);
+                    assistantMessagePlaceholder.Content = assistantResponseBuilder.ToString();
+                    _shouldScrollToBottom = true;
+                }
+            }
+
+            // Update the display list with the final, complete message content.
+            //_displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
+        }
+        catch (Exception ex)
+        {
+            _displayMessages.Add(new ChatMessageContent(AuthorRole.Assistant, $"An error occurred: {ex.Message}"));
+        }
+        finally
+        {
+            _renderTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            _isAwaitingResponse = false;
+            _displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
+            StateHasChanged();
+        }
+    }
+
+    private async Task ScrollToBottomAsync()
+    {
+        try
+        {
+            if (KernelService.IsInitialized)
+            {
+                //await JSRuntime.InvokeVoidAsync("document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight");
+            }
+        }
+        catch (JSException) { /* This can happen if the user navigates away quickly. It's safe to ignore. */ }
+    }
+
+    public void Dispose()
+    {
+        KernelService.OnChange -= OnKernelServiceChanged;
+        _renderTimer?.Dispose();
+    }
+}
