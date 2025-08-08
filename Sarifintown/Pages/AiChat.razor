@@ -6,6 +6,10 @@
 @using System.Text
 @using System.Threading
 @using Sarifintown.Services
+@using Sarifintown.Models
+@using Markdig
+@using System.Linq
+
 @inject KernelService KernelService
 @inject IJSRuntime JSRuntime
 @implements IDisposable
@@ -45,7 +49,7 @@
                     {
                         <div class="d-flex @(message.Role == AuthorRole.User ? "flex-row-reverse" : "")">
                             <MudPaper Class="pa-3" Elevation="2" Style="@(message.Role == AuthorRole.User ? "background-color: var(--mud-palette-primary); color: white;" : "")">
-                                <MudText Typo="Typo.body1">@((MarkupString)message.Content)</MudText>
+                                <MudText Typo="Typo.body1">@((MarkupString)Markdig.Markdown.ToHtml(message.FinalContent ?? ""))</MudText>
                             </MudPaper>
                         </div>
                     }
@@ -74,7 +78,7 @@
 
 @code {
     private readonly ChatHistory _chatHistory = new("You are a helpful AI assistant.");
-    private readonly List<ChatMessageContent> _displayMessages = new();
+    private readonly List<DisplayMessage> _displayMessages = new();
     private string _userInput = string.Empty;
     private bool _isAwaitingResponse;
     private ElementReference _chatContainer;
@@ -87,11 +91,12 @@
     {
         KernelService.OnChange += OnKernelServiceChanged;
 
-        if (KernelService.IsInitialized && !_chatHistory.Any())
+        if (KernelService.IsInitialized && !_displayMessages.Any())
         {
-            var assistantMessage = new ChatMessageContent(AuthorRole.Assistant, "Hello! I'm ready to chat. How can I help?");
-            _chatHistory.Add(assistantMessage);
+            var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
+            assistantMessage.DisplayContent.Append("Hello! I'm ready to chat. How can I help?");
             _displayMessages.Add(assistantMessage);
+            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.FinalContent));
         }
 
         _renderTimer = new Timer(_ => InvokeAsync(StateHasChanged), null, Timeout.Infinite, Timeout.Infinite);
@@ -132,15 +137,16 @@
             _chatHistory.Clear();
             _displayMessages.Clear();
 
-            var assistantMessage = new ChatMessageContent(AuthorRole.Assistant, "Service reconfigured! How can I help?");
-            _chatHistory.Add(assistantMessage);
+            var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
+            assistantMessage.DisplayContent.Append("Service reconfigured! How can I help?");
             _displayMessages.Add(assistantMessage);
+            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.FinalContent));
         }
     }
 
     private async Task HandleKeyDown(KeyboardEventArgs e)
     {
-        if (e.Key == "Enter")
+        if (e.Key == "Enter" && !e.ShiftKey)
         {
             await SendMessageAsync();
         }
@@ -155,25 +161,19 @@
 
         _isAwaitingResponse = true;
 
-        var userMessage = new ChatMessageContent(AuthorRole.User, _userInput);
-        _chatHistory.Add(userMessage);
-        _displayMessages.Add(userMessage);
-
+        var userMessageText = _userInput;
+        _chatHistory.AddUserMessage(userMessageText);
+        _displayMessages.Add(new DisplayMessage { Role = AuthorRole.User, DisplayContent = new StringBuilder(userMessageText) });
         _userInput = string.Empty;
         _shouldScrollToBottom = true;
         StateHasChanged();
 
-        var assistantResponseBuilder = new StringBuilder();
+        var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
+        _displayMessages.Add(assistantMessage);
 
         try
         {
             var settings = new OpenAIPromptExecutionSettings { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions };
-
-            var assistantMessagePlaceholder = new ChatMessageContent(AuthorRole.Assistant, string.Empty);
-            _displayMessages.Add(assistantMessagePlaceholder);
-
-            
-
             _renderTimer?.Change(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
 
             IAsyncEnumerable<StreamingChatMessageContent> streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(
@@ -181,30 +181,29 @@
                 executionSettings: settings,
                 kernel: KernelService.Kernel);
 
-            await foreach (StreamingChatMessageContent content in streamingResult)
+            await foreach (StreamingChatMessageContent contentChunk in streamingResult)
             {
-                // In auto-invocation mode, we only need to concern ourselves with the text content for the UI.
-                // The kernel handles the function call lifecycle in the background.
-                if (content.Content is not null)
+                if (contentChunk.Content is not null)
                 {
-                    assistantResponseBuilder.Append(content.Content);
-                    assistantMessagePlaceholder.Content = assistantResponseBuilder.ToString();
-                    _shouldScrollToBottom = true;
+                    assistantMessage.DisplayContent.Append(contentChunk.Content);
                 }
+
+                _shouldScrollToBottom = true;
             }
 
-            // Update the display list with the final, complete message content.
-            //_displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
+            _chatHistory.AddAssistantMessage(assistantMessage.FinalContent);
         }
+        catch (InvalidOperationException) { }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            _displayMessages.Add(new ChatMessageContent(AuthorRole.Assistant, $"An error occurred: {ex.Message}"));
+            //assistantMessage.DisplayContent.Clear();
+            assistantMessage.DisplayContent.Append($"An error occurred: {ex.Message}");
         }
         finally
         {
             _renderTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _isAwaitingResponse = false;
-            _displayMessages[_displayMessages.Count - 1] = new ChatMessageContent(AuthorRole.Assistant, assistantResponseBuilder.ToString());
             StateHasChanged();
         }
     }
@@ -215,10 +214,10 @@
         {
             if (KernelService.IsInitialized)
             {
-                //await JSRuntime.InvokeVoidAsync("document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight");
+                //await JSRuntime.InvokeVoidAsync("eval", "var el = document.getElementById('chatContainer'); el.scrollTop = el.scrollHeight;");
             }
         }
-        catch (JSException) { /* This can happen if the user navigates away quickly. It's safe to ignore. */ }
+        catch (JSException) { /* Safe to ignore */ }
     }
 
     public void Dispose()
