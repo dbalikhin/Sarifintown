@@ -181,23 +181,39 @@
                 executionSettings: settings,
                 kernel: KernelService.Kernel);
 
-            await foreach (StreamingChatMessageContent contentChunk in streamingResult)
+            try
             {
-                if (contentChunk.Content is not null)
+                await foreach (StreamingChatMessageContent contentChunk in streamingResult)
                 {
-                    assistantMessage.DisplayContent.Append(contentChunk.Content);
-                }
+                    if (contentChunk.Content is not null)
+                    {
+                        assistantMessage.DisplayContent.Append(contentChunk.Content);
+                    }
 
-                _shouldScrollToBottom = true;
+                    _shouldScrollToBottom = true;
+
+                    if (contentChunk.Metadata is not null && contentChunk.Metadata.TryGetValue("FinishReason", out var finishReason) && "stop".Equals(finishReason as string, StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // This exception can occur if the underlying connection is closed by the server
+                // before the client has finished reading all the data. This is common with local streaming
+                // servers and can be safely ignored as it signifies the end of the stream.
+            }
+            catch (OperationCanceledException)
+            {
+                // This is another potential exception for the same reason, kept as a fallback.
             }
 
             _chatHistory.AddAssistantMessage(assistantMessage.FinalContent);
         }
-        catch (InvalidOperationException) { }
-        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            //assistantMessage.DisplayContent.Clear();
+            assistantMessage.DisplayContent.Clear();
             assistantMessage.DisplayContent.Append($"An error occurred: {ex.Message}");
         }
         finally
