@@ -5,11 +5,15 @@ namespace Sarifintown.Models
 {
     public class DisplayMessage
     {
-        public AuthorRole Role { get; init; }
-        public StringBuilder DisplayContent { get; set; } = new();
-        public StringBuilder ThinkingLog { get; set; } = new();
-        public bool HasThinking => ThinkingLog.Length > 0;
-        public string FinalContent => DisplayContent.ToString();
-        public string FinalThinkingLog => ThinkingLog.ToString();
+        public AuthorRole Role { get; set; }
+        public string Content { get; set; }
+        public bool IsReasoning { get; set; } // Flag to identify "thinking" messages
+
+        public DisplayMessage(AuthorRole role, string content, bool isReasoning = false)
+        {
+            Role = role;
+            Content = content;
+            IsReasoning = isReasoning;
+        }
     }
 }

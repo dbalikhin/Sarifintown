@@ -4,16 +4,18 @@
 @using Microsoft.SemanticKernel.Connectors.OpenAI
 @using MudBlazor
 @using System.Text
-@using System.Threading
 @using Sarifintown.Services
 @using Sarifintown.Models
 @using Markdig
 @using System.Linq
+@using System.Text.Json
+@using System.Threading
 
 @inject KernelService KernelService
 @inject IJSRuntime JSRuntime
 @implements IDisposable
 
+@* This UI layout is from the first file, preserving the separate display for reasoning and final content. *@
 <MudContainer MaxWidth="MaxWidth.Medium" Class="mt-4">
     <MudPaper Elevation="3">
         <MudToolBar>
@@ -47,10 +49,19 @@
                 <MudStack Spacing="2">
                     @foreach (var message in _displayMessages)
                     {
-                        <div class="d-flex @(message.Role == AuthorRole.User ? "flex-row-reverse" : "")">
-                            <MudPaper Class="pa-3" Elevation="2" Style="@(message.Role == AuthorRole.User ? "background-color: var(--mud-palette-primary); color: white;" : "")">
-                                <MudText Typo="Typo.body1">@((MarkupString)Markdig.Markdown.ToHtml(message.FinalContent ?? ""))</MudText>
-                            </MudPaper>
+                        <div>
+                            @if (message.IsReasoning)
+                            {
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); padding-left: 8px; font-style: italic;">
+                                    Thinking: @message.Content
+                                </MudText>
+                            }
+                            else
+                            {
+                                <MudPaper Class="pa-3" Elevation="2" Style="@(message.Role == AuthorRole.User ? "background-color: var(--mud-palette-primary); color: white;" : "")">
+                                    <MudText Typo="Typo.body1">@((MarkupString)Markdig.Markdown.ToHtml(message.Content ?? ""))</MudText>
+                                </MudPaper>
+                            }
                         </div>
                     }
                     @if (_isAwaitingResponse)
@@ -77,7 +88,8 @@
 </MudContainer>
 
 @code {
-    private readonly ChatHistory _chatHistory = new("You are a helpful AI assistant.");
+
+    private readonly ChatHistory _chatHistory = new();
     private readonly List<DisplayMessage> _displayMessages = new();
     private string _userInput = string.Empty;
     private bool _isAwaitingResponse;
@@ -85,21 +97,23 @@
     private bool _showSettings;
     private AiSettings _editSettings = new();
     private bool _shouldScrollToBottom;
+
+    // Timer for smooth UI updates during streaming, taken from the second file.
     private Timer? _renderTimer;
 
     protected override void OnInitialized()
     {
         KernelService.OnChange += OnKernelServiceChanged;
 
+        // Initialize the render timer. It will be started on-demand.
+        //_renderTimer = new Timer(_ => InvokeAsync(StateHasChanged), null, Timeout.Infinite, Timeout.Infinite);
+
         if (KernelService.IsInitialized && !_displayMessages.Any())
         {
-            var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
-            assistantMessage.DisplayContent.Append("Hello! I'm ready to chat. How can I help?");
+            var assistantMessage = new DisplayMessage(AuthorRole.Assistant, "Hello! I'm ready to chat. How can I help?");
             _displayMessages.Add(assistantMessage);
-            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.FinalContent));
+            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.Content));
         }
-
-        _renderTimer = new Timer(_ => InvokeAsync(StateHasChanged), null, Timeout.Infinite, Timeout.Infinite);
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -137,10 +151,9 @@
             _chatHistory.Clear();
             _displayMessages.Clear();
 
-            var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
-            assistantMessage.DisplayContent.Append("Service reconfigured! How can I help?");
+            var assistantMessage = new DisplayMessage(AuthorRole.Assistant, "Service reconfigured! How can I help?");
             _displayMessages.Add(assistantMessage);
-            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.FinalContent));
+            _chatHistory.Add(new ChatMessageContent(AuthorRole.Assistant, assistantMessage.Content));
         }
     }
 
@@ -155,72 +168,89 @@
     private async Task SendMessageAsync()
     {
         if (string.IsNullOrWhiteSpace(_userInput) || _isAwaitingResponse || !KernelService.IsInitialized || KernelService.ChatCompletionService == null || KernelService.Kernel == null)
-        {
             return;
-        }
 
         _isAwaitingResponse = true;
 
         var userMessageText = _userInput;
         _chatHistory.AddUserMessage(userMessageText);
-        _displayMessages.Add(new DisplayMessage { Role = AuthorRole.User, DisplayContent = new StringBuilder(userMessageText) });
+        _displayMessages.Add(new DisplayMessage(AuthorRole.User, userMessageText));
         _userInput = string.Empty;
-        _shouldScrollToBottom = true;
-        StateHasChanged();
+        StateHasChanged(); // Show user message and spinner
 
-        var assistantMessage = new DisplayMessage { Role = AuthorRole.Assistant };
-        _displayMessages.Add(assistantMessage);
+        var reasoningBuilder = new StringBuilder();
+        var finalContentBuilder = new StringBuilder();
+        bool inResponsePhase = false;
+        const string responseMarker = ">>responding>>";
+
 
         try
         {
-            var settings = new OpenAIPromptExecutionSettings { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions };
-            _renderTimer?.Change(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
-
-            IAsyncEnumerable<StreamingChatMessageContent> streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(
-                _chatHistory,
-                executionSettings: settings,
-                kernel: KernelService.Kernel);
-
-            try
-            {
-                await foreach (StreamingChatMessageContent contentChunk in streamingResult)
+            var settings = new OpenAIPromptExecutionSettings
                 {
-                    if (contentChunk.Content is not null)
+                ChatSystemPrompt = //"Always show |message| system tag before each and every actual response to a user, hide all other system tags from a user. Start the |message| from the new line." +
+                    "You are the security expert. You will analyze a finding in a SARIF format to make a decision if it is a true positive or a false positive.", //"include >>responding>> while starting an actual response (not thinking).",
+                
+                };
+
+            var streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(_chatHistory, executionSettings: settings, kernel: KernelService.Kernel);
+
+
+            // Aggregate the entire response from the stream before updating the UI
+            await foreach (var contentChunk in streamingResult)
+            {
+                if (contentChunk.Content is not null)
+                {
+                    var text = contentChunk.Content;
+                    if (!inResponsePhase)
                     {
-                        assistantMessage.DisplayContent.Append(contentChunk.Content);
+                        int markerIndex = text.IndexOf(responseMarker, StringComparison.Ordinal);
+                        if (markerIndex >= 0)
+                        {
+                            inResponsePhase = true;
+                            reasoningBuilder.Append(text.Substring(0, markerIndex));
+                            finalContentBuilder.Append(text.Substring(markerIndex + responseMarker.Length));
+                        }
+                        else
+                        {
+                            reasoningBuilder.Append(text);
+                        }
                     }
-
-                    _shouldScrollToBottom = true;
-
-                    if (contentChunk.Metadata is not null && contentChunk.Metadata.TryGetValue("FinishReason", out var finishReason) && "stop".Equals(finishReason as string, StringComparison.OrdinalIgnoreCase))
+                    else
                     {
-                        break;
+                        finalContentBuilder.Append(text);
                     }
                 }
             }
-            catch (InvalidOperationException)
-            {
-                // This exception can occur if the underlying connection is closed by the server
-                // before the client has finished reading all the data. This is common with local streaming
-                // servers and can be safely ignored as it signifies the end of the stream.
-            }
-            catch (OperationCanceledException)
-            {
-                // This is another potential exception for the same reason, kept as a fallback.
-            }
 
-            _chatHistory.AddAssistantMessage(assistantMessage.FinalContent);
+
         }
+        catch (InvalidOperationException) { }
+        catch (OperationCanceledException) { } 
         catch (Exception ex)
         {
-            assistantMessage.DisplayContent.Clear();
-            assistantMessage.DisplayContent.Append($"An error occurred: {ex.Message}");
+            _displayMessages.Add(new DisplayMessage(AuthorRole.Assistant, $"An error occurred: {ex.Message}"));
         }
         finally
         {
-            _renderTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _isAwaitingResponse = false;
-            StateHasChanged();
+            // Now that we have the full text, add messages to the display list
+            string reasoningText = reasoningBuilder.ToString().Trim();
+            string finalContentText = finalContentBuilder.ToString().Trim();
+
+            if (!string.IsNullOrWhiteSpace(reasoningText))
+            {
+                _displayMessages.Add(new DisplayMessage(AuthorRole.Assistant, reasoningText, isReasoning: true));
+            }
+
+            if (!string.IsNullOrWhiteSpace(finalContentText))
+            {
+                _displayMessages.Add(new DisplayMessage(AuthorRole.Assistant, finalContentText));
+                // Only add the final, user-facing answer to the chat history for context
+                _chatHistory.AddAssistantMessage(finalContentText);
+            }
+            _shouldScrollToBottom = true;
+            StateHasChanged(); // Final render with all new messages
         }
     }
 
@@ -228,12 +258,9 @@
     {
         try
         {
-            if (KernelService.IsInitialized)
-            {
-                //await JSRuntime.InvokeVoidAsync("eval", "var el = document.getElementById('chatContainer'); el.scrollTop = el.scrollHeight;");
-            }
+            //await JSRuntime.InvokeVoidAsync("eval", "var el = document.getElementById('chatContainer'); el.scrollTop = el.scrollHeight;");
         }
-        catch (JSException) { /* Safe to ignore */ }
+        catch (JSException) { /* Safe to ignore if the element isn't ready */ }
     }
 
     public void Dispose()

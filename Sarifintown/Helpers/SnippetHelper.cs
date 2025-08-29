@@ -80,7 +80,7 @@ namespace Sarifintown.Helpers
                 else
                 {
                     length = Math.Min(line.Length - startIndex, length);
-                    snippetLines.Add(line.Substring(startIndex, length));
+                    snippetLines.Add(line.Substring(startIndex - 1, length));
                 }
             }
             else
