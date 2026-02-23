@@ -55,13 +55,11 @@ namespace Sarifintown.Helpers
 
         private static string ExtractSnippetFromLines(string[] allLines, int startLine, int startColumn, int endLine, int endColumn)
         {
-            // Ensure line indices are within bounds
             if (startLine < 1 || startLine > allLines.Length || endLine < 1 || endLine > allLines.Length)
             {
                 throw new ArgumentOutOfRangeException("StartLine or EndLine is out of range.");
             }
 
-            // Lines are zero-based in the array, so subtract 1
             int startLineIndex = startLine - 1;
             int endLineIndex = endLine - 1;
 
@@ -71,7 +69,7 @@ namespace Sarifintown.Helpers
             {
                 // Single-line snippet
                 string line = allLines[startLineIndex];
-                int startIndex = Math.Max(0, startColumn - 1);
+                int startIndex = Math.Max(0, startColumn - 1);  // already 0-based
                 int length = endColumn - startColumn;
                 if (startIndex >= line.Length)
                 {
@@ -80,14 +78,12 @@ namespace Sarifintown.Helpers
                 else
                 {
                     length = Math.Min(line.Length - startIndex, length);
-                    snippetLines.Add(line.Substring(startIndex - 1, length));
+                    snippetLines.Add(line.Substring(startIndex, length));  // was: startIndex - 1 (double subtraction bug)
                 }
             }
             else
             {
                 // Multi-line snippet
-
-                // Extract from the start line
                 string firstLine = allLines[startLineIndex];
                 int startIndex = Math.Max(0, startColumn - 1);
                 if (startIndex >= firstLine.Length)
@@ -99,19 +95,16 @@ namespace Sarifintown.Helpers
                     snippetLines.Add(firstLine.Substring(startIndex));
                 }
 
-                // Extract lines in between
                 for (int i = startLineIndex + 1; i < endLineIndex; i++)
                 {
                     snippetLines.Add(allLines[i]);
                 }
 
-                // Extract from the end line
                 string lastLine = allLines[endLineIndex];
                 int endIndex = Math.Min(lastLine.Length, endColumn - 1);
                 snippetLines.Add(lastLine.Substring(0, endIndex));
             }
 
-            // Combine all snippet lines
             return string.Join(Environment.NewLine, snippetLines);
         }
     }
