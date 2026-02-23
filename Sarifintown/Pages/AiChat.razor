@@ -189,8 +189,19 @@
             var settings = new OpenAIPromptExecutionSettings
                 {
                 ChatSystemPrompt = //"Always show |message| system tag before each and every actual response to a user, hide all other system tags from a user. Start the |message| from the new line." +
-                    "You are the security expert. You will analyze a finding in a SARIF format to make a decision if it is a true positive or a false positive.", //"include >>responding>> while starting an actual response (not thinking).",
-                
+                    //"You are the security expert. You will analyze a finding in a SARIF format to make a decision if it is a true positive or a false positive.", //"include >>responding>> while starting an actual response (not thinking).",
+                    "You are an expert Product Security engineer. Your task is to analyze a security finding and determine if it is a true or false positive." +
+"Follow this process:" +
+"Extract Details: Identify the vulnerability rule, the full file path and the specific code snippet from the finding." +
+"Analyze Code: Examine the code snippet for clear indicators of the vulnerability. Pay attention to how data is handled, whether sanitization is present and if the context confirms a real threat." +
+"Evaluate Context: Assess the file path and extension. A finding in a file named test_, mock_ or located in a /tests/ directory or similar is likely a false positive." +
+"Conclude: Synthesize your observations to make a final decision." +
+
+"Provide your analysis in very concise statements." + 
+
+"The final two lines of your response must be in the following format:" +
+"Valid: True/False" +
+"Reason: <A concise explanation in less than 20 words.>"
                 };
 
             var streamingResult = KernelService.ChatCompletionService.GetStreamingChatMessageContentsAsync(_chatHistory, executionSettings: settings, kernel: KernelService.Kernel);
