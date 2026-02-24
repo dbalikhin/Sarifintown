@@ -2,7 +2,6 @@ using FluentAssertions;
 using NUnit.Framework;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
-using Sarifintown.Services;
 using System.Collections.Generic;
 
 namespace Sarifintown.Tests

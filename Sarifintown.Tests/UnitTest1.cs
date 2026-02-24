@@ -6,6 +6,7 @@ using Microsoft.Playwright.NUnit;
 using NUnit.Framework;
 using FluentAssertions;
 using Sarifintown.Helpers;
+using Sarifintown.Models;
 using Sarifintown.Services;
 
 namespace Sarifintown.Tests

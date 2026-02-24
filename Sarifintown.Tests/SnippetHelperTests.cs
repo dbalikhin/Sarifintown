@@ -70,4 +70,15 @@ public class SnippetHelperTests
 
         result.Snippet.Should().Be("line3");
     }
+
+    [Test]
+    public void HighlightSnippet_ValidRegion_ReturnsHighlightedSnippet()
+    {
+        string fileContent = "line1\nline2\nline3\nline4\nline5";
+        var region = new Region { StartLine = 2, StartColumn = 1, EndLine = 4, EndColumn = 5 };
+
+        var result = SnippetHelper.HighlightSnippet(fileContent, region);
+
+        result.Should().Contain("<mark>line2\nline3\nline</mark>4");
+    }
 }

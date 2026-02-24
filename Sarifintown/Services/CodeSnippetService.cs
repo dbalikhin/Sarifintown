@@ -9,10 +9,10 @@ namespace Sarifintown.Services
 {
     public class CodeSnippetService
     {
-        private readonly JSInteropService _jsInteropService;
+        private readonly Sarifintown.Core.IFileReader _jsInteropService;
         private readonly LocalFilesService _localFilesService;
 
-        public CodeSnippetService(JSInteropService jsInteropService, LocalFilesService localFilesService)
+        public CodeSnippetService(Sarifintown.Core.IFileReader jsInteropService, LocalFilesService localFilesService)
         {
             _jsInteropService = jsInteropService;
             _localFilesService = localFilesService;

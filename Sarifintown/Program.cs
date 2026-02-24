@@ -22,6 +22,7 @@ namespace Sarifintown
             builder.Services.AddHttpClient();
 
             builder.Services.AddScoped<JSInteropService>();
+            builder.Services.AddScoped<Sarifintown.Core.IFileReader, JSInteropService>();
 
             builder.Services.AddSingleton<KernelService>();
             builder.Services.AddSingleton<IChatCompletionService>(
