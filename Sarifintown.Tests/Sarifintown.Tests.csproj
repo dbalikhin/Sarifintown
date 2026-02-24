@@ -13,13 +13,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.3.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
-    <PackageReference Include="Microsoft.Playwright.NUnit" Version="1.53.0" />
-    <PackageReference Include="NUnit" Version="4.2.2" />
-    <PackageReference Include="NUnit.Analyzers" Version="4.4.0" />
-    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    <PackageReference Include="coverlet.collector" Version="6.*" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="Microsoft.Playwright.NUnit" Version="1.*" />
+    <PackageReference Include="NUnit" Version="4.*" />
+    <PackageReference Include="NUnit.Analyzers" Version="4.*" PrivateAssets="all" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
+    <PackageReference Include="bunit" Version="2.*" />
+    <PackageReference Include="FluentAssertions" Version="8.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sarifintown\Sarifintown.csproj" />
   </ItemGroup>
 
   <ItemGroup>

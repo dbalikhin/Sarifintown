@@ -16,7 +16,7 @@
 
     @if(LocalFilesService.AllDirectories.Any())
     {
-        <MudText Color="Color.Success">Access granted for the follwing directories:</MudText>
+        <MudText Color="Color.Success">Access granted for the following directories:</MudText>
         <MudList T="DirectoryPicker">
             @foreach (var directory in LocalFilesService.AllDirectories)
             {
@@ -89,7 +89,7 @@
 
     </MudToolBar>
 
-    <MudTextField T="string" Label="SARIF files import log" Variant="Variant.Text" Text="@importLog" AutoGrow MaxLines="10" ReadOnly Immediate="true"  />
+    <MudTextField T="string" Label="SARIF files import log" Variant="Variant.Text" Text="@importLog" AutoGrow MaxLines="10" ReadOnly />
 </MudStack>
 
 @code {

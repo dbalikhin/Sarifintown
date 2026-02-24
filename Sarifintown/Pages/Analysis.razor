@@ -115,7 +115,8 @@ else
                                                                 <b>(Line: @context.Item.Locations[0].PhysicalLocation.Region.StartLine) @context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.Snippet</b>
                                                             </MudText>
 
-                                                            <CodeBlock Language="@context.Item.FilenameExt"
+                                                            <CodeBlock @key="context.Item"
+                                                                       Language="@context.Item.FilenameExt"
                                                                        CodeContent="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.ContextSnippet"
                                                                        HighlightedLines="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.StartLine.ToString()"
                                                                        StartLineNumber="@context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet.VisibleStartLine" />

@@ -52,18 +52,16 @@
                             @foreach (var methodResult in _methodResultList.OrderBy(l => l.Id))
                             {
                                 <MudFocusTrap Disabled="methodResult.Id != focusedItemId" DefaultFocus="DefaultFocus.FirstChild">
-                                    <MudCard @onclick="() => SetFocusOnLeft(methodResult)">
+                                    <MudCard @key="methodResult.Id" @onclick="() => SetFocusOnLeft(methodResult)">
                                         <MudCardContent>
                                             <MudBadge Color="@(methodResult.Id == focusedItemId ? Color.Primary : Color.Transparent)" Origin="Origin.TopLeft">
                                                 <FormattedPath Path="@methodResult.Filename" />
                                             </MudBadge>
-                                            <CodeBlock 
-                                            Language="@methodResult.FilenameExt"
-                                            CodeContent="@methodResult.ExtractedSnippet.ContextSnippet"
-                                            HighlightedLines=@methodResult.SarifRegion.StartLine.ToString()
-                                            StartLineNumber=@methodResult.SarifRegion.StartLine
-                                            SplitWindowMode=true
-                                            SingleWindowMode=true />
+                                            <CodeBlock @key="methodResult.Id"
+                                                Language="@methodResult.FilenameExt"
+                                                CodeContent="@methodResult.ExtractedSnippet.ContextSnippet"
+                                                HighlightedLines="@methodResult.SarifRegion.StartLine.ToString()"
+                                                StartLineNumber="@methodResult.SarifRegion.StartLine" />
                                         </MudCardContent>
                                     </MudCard>
                                 </MudFocusTrap>
@@ -150,13 +148,11 @@
                                             <MudBadge Color="@(codeFlowData.Id == focusedItemId ? Color.Primary : Color.Transparent)" Origin="Origin.TopLeft">
                                                 <FormattedPath Path="@codeFlowData.Filename" />
                                             </MudBadge>
-                                            <CodeBlock 
-                                            Language="@codeFlowData.FilenameExt"
-                                            CodeContent="@codeFlowData.ExtractedSnippet.ContextSnippet"
-                                            HighlightedLines=@codeFlowData.ExtractedSnippet.StartLine.ToString()
-                                            StartLineNumber=@codeFlowData.ExtractedSnippet.VisibleStartLine
-                                            SplitWindowMode=true                                        
-                                            />
+                                            <CodeBlock @key="codeFlowData.Id"
+                                                        Language="@codeFlowData.FilenameExt"
+                                                        CodeContent="@codeFlowData.ExtractedSnippet.ContextSnippet"
+                                                        HighlightedLines="@codeFlowData.ExtractedSnippet.StartLine.ToString()"
+                                                        StartLineNumber="@codeFlowData.ExtractedSnippet.VisibleStartLine" />
                                         </MudCardContent>
                                     </MudCard>
                                 </MudFocusTrap>
