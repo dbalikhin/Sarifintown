@@ -114,5 +114,61 @@ namespace Sarifintown.Helpers
 
             return string.Join(Environment.NewLine, snippetLines);
         }
+            public static string HighlightSnippet(string fileContent, Region region)
+            {
+                var result = new System.Text.StringBuilder();
+                int currentLine = 1;
+                int currentColumn = 1;
+                bool withinRegion = false;
+
+                for (int i = 0; i < fileContent.Length; i++)
+                {
+                    char currentChar = fileContent[i];
+
+                    if (currentLine == region.StartLine && currentColumn == region.StartColumn && !withinRegion)
+                    {
+                        // Start highlighting
+                        result.Append("<mark>");
+                        withinRegion = true;
+                    }
+
+                    if (currentLine == region.EndLine && currentColumn == region.EndColumn && withinRegion)
+                    {
+                        // End highlighting
+                        result.Append("</mark>");
+                        withinRegion = false;
+                    }
+
+                    result.Append(currentChar);
+
+                    // Handle both Windows and Linux line endings
+                    if (currentChar == '\r' && i + 1 < fileContent.Length && fileContent[i + 1] == '\n')
+                    {
+                        // Windows newline
+                        currentLine++;
+                        currentColumn = 1;
+                        i++; // Skip the '\n' part of the Windows newline
+                        result.Append('\n'); // Normalize to '\n' in the result
+                    }
+                    else if (currentChar == '\n')
+                    {
+                        // Linux newline
+                        currentLine++;
+                        currentColumn = 1;
+                    }
+                    else
+                    {
+                        currentColumn++;
+                    }
+                }
+
+                // If we are still within the region at the end of the loop, close the mark tag
+                if (withinRegion)
+                {
+                    result.Append("</mark>");
+                }
+
+                return result.ToString();
+            }
+        }
     }
-}

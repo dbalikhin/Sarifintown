@@ -44,6 +44,7 @@ namespace Sarifintown
             builder.Services.AddSingleton<SarifFileService>();
             builder.Services.AddSingleton<LocalFilesService>();
             builder.Services.AddSingleton<SettingsService>();
+            builder.Services.AddScoped<CodeSnippetService>();
 
             var host = builder.Build();
 
