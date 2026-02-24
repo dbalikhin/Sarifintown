@@ -1,0 +1,55 @@
+name: Playwright E2E Tests
+
+on:
+  workflow_dispatch:      # manual on-demand trigger
+  push:
+    branches: [ "main" ]
+
+# This workflow is intended to run Playwright-based end-to-end tests.
+# It is triggered manually (recommended) or on push to main when a commit message contains [run-e2e]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-e2e]')
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4.2.0
+      with:
+        dotnet-version: 9.0.x
+
+    - name: Install .NET WASM Build Tools
+      run: dotnet workload install wasm-tools
+
+    - name: Restore dotnet dependencies
+      run: dotnet restore
+
+    - name: Build (Release)
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Install Playwright browsers
+      uses: microsoft/playwright-github-action@v1
+      with:
+        browsers: chromium
+        # with-deps ensures system dependencies are installed on ubuntu-latest
+        install-deps: true
+
+    - name: Run Playwright E2E tests (Category=Playwright)
+      run: |
+        dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj \
+          --configuration Release \
+          --no-build \
+          --filter "Category=Playwright" \
+          --verbosity normal
+      env:
+        DOTNET_ENVIRONMENT: "Production"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-test-results
+        path: Sarifintown.Tests/TestResults

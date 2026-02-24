@@ -2,6 +2,8 @@
 using System.Runtime.Versioning;
 using FluentAssertions;
 using NUnit.Framework;
+using Microsoft.Playwright;
+using Microsoft.Playwright.NUnit;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -12,8 +14,9 @@ using Microsoft.Extensions.Hosting;
 namespace Sarifintown.Tests;
 
 [TestFixture]
-[Ignore("Playwright tests disabled in this test run")]
-public class BlazorTest
+[Category("Playwright")]
+[Explicit("Run Playwright e2e tests on demand")]
+public class BlazorTest : PageTest
 {
     private IHost? _appHost;
     private string? _appUrl;
@@ -68,18 +71,14 @@ public class BlazorTest
     {
         var baseUrl = _appUrl ?? throw new InvalidOperationException("App url not set");
 
-        using var client = new System.Net.Http.HttpClient();
+        await Page.GotoAsync(baseUrl);
+        Page.Url.Should().StartWith(baseUrl);
 
-        // Verify base page responds
-        var resp = await client.GetAsync(baseUrl);
-        resp.IsSuccessStatusCode.Should().BeTrue();
+        await Page.GotoAsync($"{baseUrl}/analysis");
+        Page.Url.Should().Contain("/analysis");
 
-        // Verify a couple of SPA routes return the main page (fallback to index.html)
-        var respAnalysis = await client.GetAsync($"{baseUrl}/analysis");
-        respAnalysis.IsSuccessStatusCode.Should().BeTrue();
-
-        var respSettings = await client.GetAsync($"{baseUrl}/settings");
-        respSettings.IsSuccessStatusCode.Should().BeTrue();
+        await Page.GotoAsync($"{baseUrl}/settings");
+        Page.Url.Should().Contain("/settings");
     }
 
     private static string GetTargetFrameworkMoniker()

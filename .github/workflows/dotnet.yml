@@ -31,8 +31,5 @@ jobs:
 
     - name: Build
       run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
-
-    - name: Run .NET tests
-      run: dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj --configuration Release --no-build --verbosity diag
+    - name: Test (unit + bUnit)
+      run: dotnet test --no-build --filter "Category!=Playwright" --verbosity normal

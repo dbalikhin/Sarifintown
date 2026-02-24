@@ -10,12 +10,12 @@ namespace Sarifintown.Tests;
 [NonParallelizable]
 public abstract class BunitTestContext : IDisposable
 {
-    private Bunit.TestContext? _context;
+    private BunitContext? _context;
 
     [SetUp]
     public void SetUp()
     {
-        _context = new Bunit.TestContext();
+        _context = new BunitContext();
         _context.JSInterop.Mode = JSRuntimeMode.Loose;
     }
 
