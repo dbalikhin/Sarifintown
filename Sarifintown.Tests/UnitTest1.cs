@@ -4,7 +4,6 @@ using Microsoft.Playwright;
 using Microsoft.Playwright.NUnit;
 // Playwright e2e tests are available on-demand (Category = "Playwright").
 using NUnit.Framework;
-using FluentAssertions;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using Sarifintown.Services;
@@ -54,7 +53,7 @@ namespace Sarifintown.Tests
         {
             var result = FileHelper.NormalizePath(@"C:\repo\.\src\..\app\file.txt");
 
-            result.Should().Be("C:/repo/app/file.txt");
+            Assert.That(result, Is.EqualTo("C:/repo/app/file.txt"));
         }
 
         [Test]
@@ -69,9 +68,9 @@ namespace Sarifintown.Tests
 
             var result = FileHelper.AdjustPathToGrantedFolder("repo/src/file.cs", new[] { folder }, out var error);
 
-            error.Should().BeNull();
-            result.adjustedPath.Should().Be("src/file.cs");
-            result.matchedFolder.Should().Be(folder);
+            Assert.That(error, Is.Null);
+            Assert.That(result.adjustedPath, Is.EqualTo("src/file.cs"));
+            Assert.That(result.matchedFolder, Is.EqualTo(folder));
         }
 
     }

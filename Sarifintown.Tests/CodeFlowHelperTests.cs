@@ -1,4 +1,3 @@
-using FluentAssertions;
 using NUnit.Framework;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
@@ -17,7 +16,7 @@ namespace Sarifintown.Tests
 
             var codeFlows = CodeFlowHelper.PrepareCodeResults(result, 0, directories);
 
-            codeFlows.Should().BeEmpty();
+            Assert.That(codeFlows, Is.Empty);
         }
 
         [Test]
@@ -61,14 +60,14 @@ namespace Sarifintown.Tests
 
             var codeFlows = CodeFlowHelper.PrepareCodeResults(result, 1, directories);
 
-            codeFlows.Should().HaveCount(1);
-            codeFlows[0].Id.Should().Be(1);
-            codeFlows[0].Filename.Should().Be("src/file.cs");
-            codeFlows[0].FilenameExt.Should().Be("cs");
-            codeFlows[0].Region.StartLine.Should().Be(10);
-            codeFlows[0].Region.EndLine.Should().Be(12);
-            codeFlows[0].Region.StartColumn.Should().Be(5);
-            codeFlows[0].Region.EndColumn.Should().Be(20);
+            Assert.That(codeFlows, Has.Count.EqualTo(1));
+            Assert.That(codeFlows[0].Id, Is.EqualTo(1));
+            Assert.That(codeFlows[0].Filename, Is.EqualTo("src/file.cs"));
+            Assert.That(codeFlows[0].FilenameExt, Is.EqualTo("cs"));
+            Assert.That(codeFlows[0].Region.StartLine, Is.EqualTo(10));
+            Assert.That(codeFlows[0].Region.EndLine, Is.EqualTo(12));
+            Assert.That(codeFlows[0].Region.StartColumn, Is.EqualTo(5));
+            Assert.That(codeFlows[0].Region.EndColumn, Is.EqualTo(20));
         }
 
         [Test]
@@ -124,9 +123,9 @@ namespace Sarifintown.Tests
 
             var codeFlows = CodeFlowHelper.PrepareCodeResults(result, 1, directories);
 
-            codeFlows.Should().HaveCount(1);
-            codeFlows[0].Region.StartColumn.Should().Be(2);
-            codeFlows[0].Region.EndColumn.Should().Be(25);
+            Assert.That(codeFlows, Has.Count.EqualTo(1));
+            Assert.That(codeFlows[0].Region.StartColumn, Is.EqualTo(2));
+            Assert.That(codeFlows[0].Region.EndColumn, Is.EqualTo(25));
         }
     }
 }

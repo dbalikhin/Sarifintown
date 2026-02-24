@@ -1,4 +1,3 @@
-using FluentAssertions;
 using NUnit.Framework;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
@@ -13,7 +12,7 @@ namespace Sarifintown.Tests
         public void FilterBySeverityAndRule_WithNullResult_ReturnsFalse()
         {
             var result = AnalysisHelper.FilterBySeverityAndRule(null, new List<string>(), new List<RuleWithCount>());
-            result.Should().BeFalse();
+            Assert.That(result, Is.False);
         }
 
         [Test]
@@ -25,7 +24,7 @@ namespace Sarifintown.Tests
 
             var isVisible = AnalysisHelper.FilterBySeverityAndRule(result, selectedSeverity, selectedRules);
 
-            isVisible.Should().BeTrue();
+            Assert.That(isVisible, Is.True);
         }
 
         [Test]
@@ -37,7 +36,7 @@ namespace Sarifintown.Tests
 
             var isVisible = AnalysisHelper.FilterBySeverityAndRule(result, selectedSeverity, selectedRules);
 
-            isVisible.Should().BeFalse();
+            Assert.That(isVisible, Is.False);
         }
 
         [Test]
@@ -52,7 +51,7 @@ namespace Sarifintown.Tests
 
             var isVisible = AnalysisHelper.FilterBySeverityAndRule(result, selectedSeverity, selectedRules);
 
-            isVisible.Should().BeTrue();
+            Assert.That(isVisible, Is.True);
         }
 
         [Test]
@@ -67,49 +66,49 @@ namespace Sarifintown.Tests
 
             var isVisible = AnalysisHelper.FilterBySeverityAndRule(result, selectedSeverity, selectedRules);
 
-            isVisible.Should().BeFalse();
+            Assert.That(isVisible, Is.False);
         }
 
         [Test]
         public void GetMultiSelectionText_WithEmptyList_ReturnsZeroFiles()
         {
             var result = AnalysisHelper.GetMultiSelectionText(new List<string>());
-            result.Should().Be("0 SARIF files have been selected");
+            Assert.That(result, Is.EqualTo("0 SARIF files have been selected"));
         }
 
         [Test]
         public void GetMultiSelectionText_WithOneFile_ReturnsOneFile()
         {
             var result = AnalysisHelper.GetMultiSelectionText(new List<string> { "file1" });
-            result.Should().Be("1 SARIF file has been selected");
+            Assert.That(result, Is.EqualTo("1 SARIF file has been selected"));
         }
 
         [Test]
         public void GetMultiSelectionText_WithMultipleFiles_ReturnsMultipleFiles()
         {
             var result = AnalysisHelper.GetMultiSelectionText(new List<string> { "file1", "file2" });
-            result.Should().Be("2 SARIF files have been selected");
+            Assert.That(result, Is.EqualTo("2 SARIF files have been selected"));
         }
 
         [Test]
         public void GetMultiSelectionRuleText_WithEmptyList_ReturnsAllRules()
         {
             var result = AnalysisHelper.GetMultiSelectionRuleText(new List<string>());
-            result.Should().Be("All rules selected");
+            Assert.That(result, Is.EqualTo("All rules selected"));
         }
 
         [Test]
         public void GetMultiSelectionRuleText_WithOneRule_ReturnsOneRule()
         {
             var result = AnalysisHelper.GetMultiSelectionRuleText(new List<string> { "rule1" });
-            result.Should().Be("1 Rule selected");
+            Assert.That(result, Is.EqualTo("1 Rule selected"));
         }
 
         [Test]
         public void GetMultiSelectionRuleText_WithMultipleRules_ReturnsMultipleRules()
         {
             var result = AnalysisHelper.GetMultiSelectionRuleText(new List<string> { "rule1", "rule2" });
-            result.Should().Be("2 Rules selected");
+            Assert.That(result, Is.EqualTo("2 Rules selected"));
         }
     }
 }

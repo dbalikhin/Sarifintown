@@ -1,4 +1,3 @@
-using FluentAssertions;
 using NUnit.Framework;
 using Sarifintown.Helpers;
 
@@ -25,7 +24,7 @@ namespace Sarifintown.Tests
         public void GetLanguageByExtension_ReturnsExpectedLanguage(string? extension, string expectedLanguage)
         {
             var result = TreeSitterLanguageHelper.GetLanguageByExtension(extension);
-            result.Should().Be(expectedLanguage);
+            Assert.That(result, Is.EqualTo(expectedLanguage));
         }
     }
 }
