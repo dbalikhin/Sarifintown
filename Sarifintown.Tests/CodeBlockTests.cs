@@ -1,5 +1,4 @@
 using Bunit;
-using FluentAssertions;
 using NUnit.Framework;
 using Sarifintown.Pages;
 
@@ -17,7 +16,7 @@ public class CodeBlockTests : BunitTestContext
             .Add(c => c.CodeContent, "var x = 1;")
             .Add(c => c.StartLineNumber, 1));
 
-        cut.Find("code").ClassList.Should().Contain("language-csharp");
+        Assert.That(cut.Find("code").ClassList, Does.Contain("language-csharp"));
     }
 
     [Test]
@@ -28,7 +27,7 @@ public class CodeBlockTests : BunitTestContext
             .Add(c => c.CodeContent, "<xml/>")
             .Add(c => c.StartLineNumber, 1));
 
-        cut.Find("code").ClassList.Should().Contain("language-xml");
+        Assert.That(cut.Find("code").ClassList, Does.Contain("language-xml"));
     }
 
     [Test]
@@ -39,7 +38,7 @@ public class CodeBlockTests : BunitTestContext
             .Add(c => c.CodeContent, "")
             .Add(c => c.StartLineNumber, 1));
 
-        act.Should().NotThrow();
+        Assert.DoesNotThrow(() => act());
     }
 
     [Test]
@@ -50,6 +49,6 @@ public class CodeBlockTests : BunitTestContext
             .Add(c => c.CodeContent, "int x;")
             .Add(c => c.StartLineNumber, 42));
 
-        cut.Find("pre").GetAttribute("data-start").Should().Be("42");
+        Assert.That(cut.Find("pre").GetAttribute("data-start"), Is.EqualTo("42"));
     }
 }

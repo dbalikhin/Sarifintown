@@ -5,7 +5,8 @@ Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysi
 ## Projects
 
 - **Sarifintown**: Blazor WebAssembly app for SARIF analysis and code snippet extraction.
-- **Sarifintown.Tests**: Test project using NUnit and Playwright for automated testing.
+- **Sarifintown.Core**: Core library containing models, helpers, and shared logic.
+- **Sarifintown.Tests**: Test project using NUnit, bUnit, and Playwright for automated testing.
 
 ## Features
 
@@ -13,15 +14,15 @@ Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysi
 - Uses Browser File System API to read source code files (read-only access)
 - Import SARIF files via drag-and-drop or file picker.
 - Extract and highlight code snippets for each finding with PrismJS.
-- Show full code flows 
+- Show full code flows.
+- Extract whole methods with Tree-sitter WASM grammars to improve code flow analysis.
+- AI Chat integration using Semantic Kernel for intelligent code analysis.
 - Responsive UI built with MudBlazor.
 - Group and filter results by severity, rule and file path.
 
-Under development: Extract the whole methods with Tree-sitter WASM grammars to improve code flow analysis.
-
 ## Prerequisites
 
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - Chromium-based browsers (Edge, Chrome) for File System API support. Sorry Firefox.
 
 

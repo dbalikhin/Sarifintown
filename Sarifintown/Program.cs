@@ -22,6 +22,7 @@ namespace Sarifintown
             builder.Services.AddHttpClient();
 
             builder.Services.AddScoped<JSInteropService>();
+            builder.Services.AddScoped<Sarifintown.Core.IFileReader, JSInteropService>();
 
             builder.Services.AddSingleton<KernelService>();
             builder.Services.AddSingleton<IChatCompletionService>(
@@ -44,6 +45,7 @@ namespace Sarifintown
             builder.Services.AddSingleton<SarifFileService>();
             builder.Services.AddSingleton<LocalFilesService>();
             builder.Services.AddSingleton<SettingsService>();
+            builder.Services.AddScoped<CodeSnippetService>();
 
             var host = builder.Build();
 

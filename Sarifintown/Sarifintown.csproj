@@ -14,7 +14,6 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.3" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.OpenAI" Version="1.72.0" />
     <PackageReference Include="MudBlazor" Version="8.11.0" />
-    <PackageReference Include="System.Text.Json" Version="10.0.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -67,6 +66,10 @@
     <Content Update="wwwroot\js\tree-sitter\tree-sitter.wasm">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sarifintown.Core\Sarifintown.Core.csproj" />
   </ItemGroup>
 
 </Project>

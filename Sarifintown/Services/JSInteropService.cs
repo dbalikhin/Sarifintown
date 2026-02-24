@@ -1,8 +1,9 @@
 ﻿using Microsoft.JSInterop;
+using Sarifintown.Core;
 
 namespace Sarifintown.Services
 {
-    public class JSInteropService
+    public class JSInteropService : IFileReader
     {
         private readonly IJSRuntime _jsRuntime;
 

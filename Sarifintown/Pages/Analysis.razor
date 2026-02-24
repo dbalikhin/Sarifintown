@@ -10,6 +10,7 @@
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject LocalFilesService LocalFilesService
+@inject CodeSnippetService CodeSnippetService
 
 <PageTitle>Analysis</PageTitle>
 
@@ -158,14 +159,7 @@ else
 
     private bool FilterBySeverityAndRule(Result result)
     {
-        // filter by severity
-        bool rowVisible = _selectedSeverity.Contains(result.Level);
-        // filter by only selected rule (empty selection is treated as All rules selected)
-        if (_selectedRules != null && _selectedRules.Count() > 0)
-        { 
-            rowVisible &= _selectedRules.Select(r => r.Rule.Id).Contains(result.RuleId);
-        }
-        return rowVisible;
+        return AnalysisHelper.FilterBySeverityAndRule(result, _selectedSeverity, _selectedRules);
     }
 
     private Color GetAvatarColor(string level)
@@ -207,21 +201,12 @@ else
 
     private string GetMultiSelectionText(List<string> selectedValues)
     {
-        //return $"Selected SARIF file{(selectedValues.Count > 1 ? "s" : "")}: {string.Join(", ", selectedValues.Select(x => x))}";
-        return $"{selectedValues.Count} SARIF file{(selectedValues.Count > 1 ? "s have" : " has")} been selected";
+        return AnalysisHelper.GetMultiSelectionText(selectedValues);
     }
 
     private string GetMultiSelectionRuleText(List<string> selectedValues)
     {
-
-        if (selectedValues.Count == 0)
-        {
-            return "All rules selected";
-        }
-        else
-        {
-            return $"{selectedValues.Count} Rule{(selectedValues.Count > 1 ? "s" : "")} selected";
-        }
+        return AnalysisHelper.GetMultiSelectionRuleText(selectedValues);
     }
 
     protected override void OnInitialized()
@@ -258,59 +243,11 @@ else
 
     private async Task AddCodeSnippetsAsync(Run run)
     {
-        if (run.JSDirectoryId == 0 && !LocalFilesService.AllDirectories.Any())
+        var (success, errorMessage) = await CodeSnippetService.AddCodeSnippetsToRunAsync(run, () => InvokeAsync(StateHasChanged));
+
+        if (!success)
         {
-            Snackbar.Add("No Source Code Folder Selected", Severity.Error);
-        }
-        else if (run.JSDirectoryId == 0)
-        {
-            try
-            {
-                foreach (var result in run.Results)
-                {
-                    if (result.Locations.Any())
-                    {
-                        var normalizedPath = FileHelper.NormalizePath(result.FilenamePath);
-
-                        string error;
-                        string content;
-                        var (adjustedPath, matchedFolder) = FileHelper.AdjustPathToGrantedFolder(normalizedPath, LocalFilesService.AllDirectories, out error);
-                        if (adjustedPath == null || matchedFolder == null)
-                        {    
-                            Snackbar.Add(error, Severity.Error);
-                            break;                           
-                        }
-                        else
-                        {
-                            // Assign the matched folder's Id to the run
-                            run.JSDirectoryId = matchedFolder.Id;
-
-                            // save adjusted path for furure references
-                            result.FilenamePath = adjustedPath;
-
-                            content = await JSInteropService.ReadFileContentAsync(run.JSDirectoryId, adjustedPath);
-                            if (content == null || content == "")
-                            {
-                                Snackbar.Add($"Unable to read {result.FilenamePath}");
-                                break;
-                            }
-                        }
-
-                        var region = result.Locations[0].PhysicalLocation.Region;
-                        var res = SnippetHelper.ExtractCodeSnippet(content, region.StartLine, region.StartColumn, region.EndLine, region.EndColumn);
-
-                        result.Locations[0].PhysicalLocation.ExtractedCodeSnippet = res;
-
-                        // Notify UI of changes after each snippet is added
-                        await InvokeAsync(StateHasChanged);
-                    }
-                }   
-            }
-            catch (Exception ex)
-            {
-                Snackbar.Add(ex.Message, Severity.Error);
-                await InvokeAsync(StateHasChanged);
-            }
+            Snackbar.Add(errorMessage, Severity.Error);
         }
     }
 

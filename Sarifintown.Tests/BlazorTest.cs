@@ -1,6 +1,5 @@
 ﻿using System.Reflection;
 using System.Runtime.Versioning;
-using FluentAssertions;
 using NUnit.Framework;
 using Microsoft.Playwright;
 using Microsoft.Playwright.NUnit;
@@ -72,13 +71,13 @@ public class BlazorTest : PageTest
         var baseUrl = _appUrl ?? throw new InvalidOperationException("App url not set");
 
         await Page.GotoAsync(baseUrl);
-        Page.Url.Should().StartWith(baseUrl);
+        Assert.That(Page.Url, Does.StartWith(baseUrl));
 
         await Page.GotoAsync($"{baseUrl}/analysis");
-        Page.Url.Should().Contain("/analysis");
+        Assert.That(Page.Url, Does.Contain("/analysis"));
 
         await Page.GotoAsync($"{baseUrl}/settings");
-        Page.Url.Should().Contain("/settings");
+        Assert.That(Page.Url, Does.Contain("/settings"));
     }
 
     private static string GetTargetFrameworkMoniker()
