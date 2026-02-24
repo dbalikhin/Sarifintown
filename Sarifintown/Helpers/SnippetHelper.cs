@@ -70,7 +70,7 @@ namespace Sarifintown.Helpers
                 // Single-line snippet
                 string line = allLines[startLineIndex];
                 int startIndex = Math.Max(0, startColumn - 1);  // already 0-based
-                int length = endColumn - startColumn;
+                int length = endColumn - startColumn + 1; // make endColumn inclusive
                 if (startIndex >= line.Length)
                 {
                     snippetLines.Add(string.Empty);
@@ -101,8 +101,15 @@ namespace Sarifintown.Helpers
                 }
 
                 string lastLine = allLines[endLineIndex];
-                int endIndex = Math.Min(lastLine.Length, endColumn - 1);
-                snippetLines.Add(lastLine.Substring(0, endIndex));
+                int endIndex = Math.Min(lastLine.Length, endColumn); // make endColumn inclusive
+                if (endIndex > 0)
+                {
+                    snippetLines.Add(lastLine.Substring(0, endIndex));
+                }
+                else
+                {
+                    snippetLines.Add(string.Empty);
+                }
             }
 
             return string.Join(Environment.NewLine, snippetLines);
