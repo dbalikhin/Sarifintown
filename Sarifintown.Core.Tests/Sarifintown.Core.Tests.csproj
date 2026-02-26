@@ -9,25 +9,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-	<FrameworkReference Include="Microsoft.AspNetCore.App" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="8.0.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
-    <PackageReference Include="Microsoft.Playwright.NUnit" Version="1.58.0" />
-	  <PackageReference Include="NUnit" Version="4.5.0" />
-	  <PackageReference Include="NUnit.Analyzers" Version="4.11.2" PrivateAssets="all" />
+    <PackageReference Include="NUnit" Version="4.5.0" />
+    <PackageReference Include="NUnit.Analyzers" Version="4.11.2" PrivateAssets="all" />
     <PackageReference Include="NUnit3TestAdapter" Version="6.1.0" />
-    <PackageReference Include="bunit" Version="2.5.3" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\Sarifintown\Sarifintown.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Using Include="NUnit.Framework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sarifintown.Core\Sarifintown.Core.csproj" />
   </ItemGroup>
 
 </Project>

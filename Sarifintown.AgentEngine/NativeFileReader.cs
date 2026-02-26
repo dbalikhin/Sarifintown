@@ -16,9 +16,5 @@ namespace Sarifintown.AgentEngine
             return await File.ReadAllTextAsync(fullPath);
         }
 
-        public Task<string> ReadFileContentAsync(int directoryId, string fileName)
-        {
-            throw new NotImplementedException();
-        }
     }
 }

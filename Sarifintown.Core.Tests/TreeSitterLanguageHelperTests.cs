@@ -1,7 +1,7 @@
 using NUnit.Framework;
 using Sarifintown.Helpers;
 
-namespace Sarifintown.Tests
+namespace Sarifintown.Core.Tests
 {
     [TestFixture]
     public class TreeSitterLanguageHelperTests

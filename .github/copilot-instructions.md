@@ -2,5 +2,5 @@
 
 ## Project Guidelines
 - User prefers fewer dependencies.
-- Never attempt to run 'dotnet new' or similar commands. Assume project structures are already created.
+- Always use explicit, fully qualified version numbers for NuGet packages in .csproj files and avoid wildcards or floating versions
 - User prefers standard NUnit assertions over FluentAssertions because FluentAssertions is not free.

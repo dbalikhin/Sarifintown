@@ -12,8 +12,11 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
 
     public async Task InitializeAsync()
     {
+        var baseDir = AppContext.BaseDirectory;
+        var treeSitterJsPath = Path.Combine(baseDir, "tree-sitter", "tree-sitter.js");
+
         // 1. Load the web-tree-sitter JS glue code you already have
-        var treeSitterJs = await File.ReadAllTextAsync("wwwroot/js/tree-sitter/tree-sitter.js");
+        var treeSitterJs = await File.ReadAllTextAsync(treeSitterJsPath);
         _engine.Execute(treeSitterJs);
 
         // 2. Provide a mock for console.log if tree-sitter uses it
@@ -36,8 +39,10 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
 
     public async Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
     {
+        var baseDir = AppContext.BaseDirectory;
+        var wasmPath = Path.Combine(baseDir, "tree-sitter", $"tree-sitter-{language.ToLower()}.wasm");
+
         // 1. Read the language WASM file bytes from disk natively in C#
-        var wasmPath = $"wwwroot/js/tree-sitter/tree-sitter-{language.ToLower()}.wasm";
         var wasmBytes = await File.ReadAllBytesAsync(wasmPath);
 
         // 2. Push bytes to JS memory and execute your existing extraction logic

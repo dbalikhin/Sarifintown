@@ -3,7 +3,7 @@ using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.Collections.Generic;
 
-namespace Sarifintown.Tests
+namespace Sarifintown.Core.Tests
 {
     [TestFixture]
     public class CodeFlowHelperTests

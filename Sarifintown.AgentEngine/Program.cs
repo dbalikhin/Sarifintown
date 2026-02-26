@@ -19,6 +19,18 @@ builder.Services.AddMcpServer()
 
 var app = builder.Build();
 
+var assembly = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "ModelContextProtocol");
+if (assembly != null)
+{
+    var type = assembly.GetType("Microsoft.Extensions.DependencyInjection.McpServerBuilderExtensions");
+    if (type != null)
+    {
+        var methods = type.GetMethods().Select(m => m.Name).Distinct().ToList();
+        System.IO.File.WriteAllLines("methods.txt", methods);
+    }
+}
+return;
+
 // Ensure TreeSitter is initialized before accepting AI requests
 var treeSitter = app.Services.GetRequiredService<ITreeSitterEngine>();
 await treeSitter.InitializeAsync();
