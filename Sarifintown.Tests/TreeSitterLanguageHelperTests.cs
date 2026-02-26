@@ -23,7 +23,7 @@ namespace Sarifintown.Tests
         [TestCase(null, "")]
         public void GetLanguageByExtension_ReturnsExpectedLanguage(string? extension, string expectedLanguage)
         {
-            var result = TreeSitterLanguageHelper.GetLanguageByExtension(extension);
+            var result = TreeSitterLanguageHelper.GetLanguageByExtension(extension!);
             Assert.That(result, Is.EqualTo(expectedLanguage));
         }
     }

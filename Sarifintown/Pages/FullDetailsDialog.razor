@@ -185,7 +185,6 @@
 
 
     private int focusedItemId = 0;
-    private bool _isTreeSitterInitialized = false;
 
     private void SetFocusOnRight(CodeFlowData codeFlowData)
     {
@@ -242,7 +241,6 @@
                 // Initialize Tree-sitter Web Worker
                 await JS.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
                 output = "Tree-sitter worker initialized successfully.";
-                _isTreeSitterInitialized = true;
                 Snackbar.Add($"{output}", Severity.Success);
             }
             catch (Exception ex)

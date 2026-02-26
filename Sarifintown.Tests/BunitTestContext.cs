@@ -24,7 +24,7 @@ public abstract class BunitTestContext : IDisposable
     protected IRenderedComponent<TComponent> Render<TComponent>(
         Action<ComponentParameterCollectionBuilder<TComponent>>? parameters = null)
         where TComponent : IComponent
-        => _context.Render<TComponent>(parameters);
+        => _context!.Render<TComponent>(parameters);
 
 
     [TearDown]
