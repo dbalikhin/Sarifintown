@@ -5,7 +5,7 @@
 @using static Sarifintown.Models.Region
 
 @inject SarifFileService SarifFileService
-@inject Sarifintown.Core.IFileReader JSInteropService
+@inject Sarifintown.Core.IFileReader FileReader
 @inject IJSRuntime JS
 @inject SettingsService SettingsService
 @inject ISnackbar Snackbar
@@ -185,7 +185,6 @@
 
 
     private int focusedItemId = 0;
-    private bool _isTreeSitterInitialized = false;
 
     private void SetFocusOnRight(CodeFlowData codeFlowData)
     {
@@ -216,7 +215,7 @@
         var fileNames = _codeFlowDataList.Select(cf => cf.Filename).Distinct().ToList();
         foreach (var filename in fileNames)
         {
-            var fileContent = await JSInteropService.ReadFileContentAsync(JSDirectoryId, filename);
+            var fileContent = await FileReader.ReadFileAsync(filename);
             _usedFiles.Add(filename, fileContent);
         }
 
@@ -242,7 +241,6 @@
                 // Initialize Tree-sitter Web Worker
                 await JS.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
                 output = "Tree-sitter worker initialized successfully.";
-                _isTreeSitterInitialized = true;
                 Snackbar.Add($"{output}", Severity.Success);
             }
             catch (Exception ex)

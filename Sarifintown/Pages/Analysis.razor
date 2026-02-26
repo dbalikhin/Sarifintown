@@ -5,7 +5,6 @@
 @using System.Linq
 
 @inject SarifFileService SarifFileService
-@inject JSInteropService JSInteropService
 @inject IJSRuntime JS
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
@@ -154,8 +153,8 @@ else
     private bool IsGrouped { get; set; } = false;
     private MudDataGrid<Result> dataGrid;
 
-    private IReadOnlyCollection<string> _selectedSeverity;
-    private IEnumerable<RuleWithCount> _selectedRules;
+    private IReadOnlyCollection<string>? _selectedSeverity;
+    private IEnumerable<RuleWithCount>? _selectedRules;
 
     private bool FilterBySeverityAndRule(Result result)
     {
@@ -194,10 +193,9 @@ else
         _selectedSeverity = selectedValues;
     }
 
-    private IEnumerable<SarifFile> selectedFiles { get; set; }
+    private IEnumerable<SarifFile> selectedFiles { get; set; } = new List<SarifFile>();
     private List<string> selectedItems = new();
     private List<Run> CombinedRuns = new();
-    private string _mudTextSourceCode = "Please add source code for the folder.";
 
     private string GetMultiSelectionText(List<string> selectedValues)
     {
@@ -219,15 +217,6 @@ else
         // reset selected rules
         _selectedRules = null;
     }
-
-
-    private IBrowserFile sarifFile;
-    private bool showFileList = false; // Toggle to display the list of files
-    private ElementReference directoryInput;
-    private SarifFile mySarif;
-
-    private DirectoryPickerResult directoryPickerResult;
-    private string directoryName;
 
     private Task OpenDetailsAsync(Result result, int  jsDirectoryId)
     {

@@ -11,7 +11,7 @@ namespace Sarifintown.Tests
         [Test]
         public void FilterBySeverityAndRule_WithNullResult_ReturnsFalse()
         {
-            var result = AnalysisHelper.FilterBySeverityAndRule(null, new List<string>(), new List<RuleWithCount>());
+            var result = AnalysisHelper.FilterBySeverityAndRule(null!, new List<string>(), new List<RuleWithCount>());
             Assert.That(result, Is.False);
         }
 

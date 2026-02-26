@@ -99,7 +99,7 @@
     private bool _shouldScrollToBottom;
 
     // Timer for smooth UI updates during streaming, taken from the second file.
-    private Timer? _renderTimer;
+    // private Timer? _renderTimer;
 
     protected override void OnInitialized()
     {
@@ -277,6 +277,6 @@
     public void Dispose()
     {
         KernelService.OnChange -= OnKernelServiceChanged;
-        _renderTimer?.Dispose();
+        // _renderTimer?.Dispose();
     }
 }
