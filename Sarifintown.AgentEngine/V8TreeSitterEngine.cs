@@ -1,4 +1,6 @@
-﻿using Microsoft.ClearScript.V8;
+﻿using Microsoft.ClearScript;
+using Microsoft.ClearScript.JavaScript;
+using Microsoft.ClearScript.V8;
 using Sarifintown.Core;
 
 public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
@@ -14,27 +16,42 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
     {
         var baseDir = AppContext.BaseDirectory;
         var treeSitterJsPath = Path.Combine(baseDir, "tree-sitter", "tree-sitter.js");
+        var treeSitterWasmPath = Path.Combine(baseDir, "tree-sitter", "tree-sitter.wasm"); // Core WASM engine
 
-        // 1. Load the web-tree-sitter JS glue code you already have
+        // 1. Read JS and Core WASM
         var treeSitterJs = await File.ReadAllTextAsync(treeSitterJsPath);
-        _engine.Execute(treeSitterJs);
+        var coreWasmBytes = await File.ReadAllBytesAsync(treeSitterWasmPath);
 
-        // 2. Provide a mock for console.log if tree-sitter uses it
+        _engine.Execute(treeSitterJs);
         _engine.Execute("var console = { log: function(msg) {}, error: function(msg) {} };");
 
-        // 3. Setup global initialization script
+        // 2. Pass core WASM bytes to JS
+        _engine.Script.coreWasmBytes = coreWasmBytes;
+
+        // 3. Setup global initialization script with the wasmBinary injected
         _engine.Execute(@"
             let parser = null;
             let currentLanguageName = null;
             
             async function initTreeSitter() {
-                await TreeSitter.init();
+                // Convert .NET byte array to JS Uint8Array
+                const coreArray = new Uint8Array(coreWasmBytes.Length);
+                for (let i = 0; i < coreWasmBytes.Length; i++) {
+                    coreArray[i] = coreWasmBytes[i];
+                }
+
+                // Pass the WASM binary directly to TreeSitter's Emscripten bootstrapper
+                await TreeSitter.init({
+                    wasmBinary: coreArray
+                });
+                
                 parser = new TreeSitter();
             }
-            // Trigger init synchronously for setup (or wrap in promise block)
         ");
 
-        await Task.Run(() => _engine.Execute("initTreeSitter()"));
+        // 4. Properly AWAIT the JS Promise so initialization completes before parsing
+        var initPromise = _engine.Evaluate("initTreeSitter()");
+        await ((ScriptObject)initPromise).ToTask();
     }
 
     public async Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
@@ -42,28 +59,33 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
         var baseDir = AppContext.BaseDirectory;
         var wasmPath = Path.Combine(baseDir, "tree-sitter", $"tree-sitter-{language.ToLower()}.wasm");
 
-        // 1. Read the language WASM file bytes from disk natively in C#
         var wasmBytes = await File.ReadAllBytesAsync(wasmPath);
 
-        // 2. Push bytes to JS memory and execute your existing extraction logic
         _engine.Script.sourceCode = sourceCode;
         _engine.Script.wasmBytes = wasmBytes;
 
-        // Notice the 'dynamic' keyword here
-        dynamic promise = _engine.Evaluate(@"
+        var promise = _engine.Evaluate(@"
             (async () => {
-                const wasmArray = new Uint8Array(wasmBytes.ToArray());
-                const lang = await TreeSitter.Language.load(wasmArray);
-                parser.setLanguage(lang);
-                
-                const tree = parser.parse(sourceCode);
-                
-                // Return the string natively back to C#
-                return tree.rootNode.toString();
+                try {
+                    const wasmArray = new Uint8Array(wasmBytes.Length);
+                    for (let i = 0; i < wasmBytes.Length; i++) {
+                        wasmArray[i] = wasmBytes[i];
+                    }
+                    
+                    const lang = await TreeSitter.Language.load(wasmArray);
+                    parser.setLanguage(lang);
+
+                    const tree = parser.parse(sourceCode);
+
+                    return tree.rootNode.toString();
+                } catch (e) {
+                    return 'ERROR: ' + e.toString();
+                }
             })()
         ");
 
-        string result = await promise;
+        // Properly cast and await the result
+        string result = (string)await ((ScriptObject)promise).ToTask();
         return result;
     }
 
