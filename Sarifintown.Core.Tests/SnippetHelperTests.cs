@@ -2,7 +2,7 @@ using NUnit.Framework;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 
-namespace Sarifintown.Tests;
+namespace Sarifintown.Core.Tests;
 
 [TestFixture]
 public class SnippetHelperTests
