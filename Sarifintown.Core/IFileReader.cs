@@ -4,6 +4,8 @@ namespace Sarifintown.Core
 {
     public interface IFileReader
     {
-        Task<string> ReadFileContentAsync(int directoryId, string fileName);
+        //Task<string> ReadFileContentAsync(int directoryId, string fileName);
+
+        Task<string> ReadFileAsync(string relativePath);
     }
 }

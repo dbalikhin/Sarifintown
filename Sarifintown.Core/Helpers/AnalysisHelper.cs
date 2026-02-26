@@ -1,3 +1,4 @@
+using Sarifintown.Core;
 using Sarifintown.Models;
 using System.Collections.Generic;
 using System.Linq;
@@ -6,6 +7,19 @@ namespace Sarifintown.Helpers
 {
     public static class AnalysisHelper
     {
+
+        public static async Task<CodeSnippet> ExtractSnippetAsync(
+        string relativePath,
+        IFileReader fileReader)
+        {
+            // The helper just calls the abstract method. 
+            // Blazor or Console handles the actual hunting.
+            string sourceCode = await fileReader.ReadFileAsync(relativePath);
+
+            // ... do your Tree-sitter or SARIF processing here
+            return new CodeSnippet { };
+        }
+
         public static bool FilterBySeverityAndRule(Result result, IReadOnlyCollection<string> selectedSeverity, IEnumerable<RuleWithCount> selectedRules)
         {
             if (result == null) return false;

@@ -5,7 +5,7 @@
 @using static Sarifintown.Models.Region
 
 @inject SarifFileService SarifFileService
-@inject Sarifintown.Core.IFileReader JSInteropService
+@inject Sarifintown.Core.IFileReader FileReader
 @inject IJSRuntime JS
 @inject SettingsService SettingsService
 @inject ISnackbar Snackbar
@@ -216,7 +216,7 @@
         var fileNames = _codeFlowDataList.Select(cf => cf.Filename).Distinct().ToList();
         foreach (var filename in fileNames)
         {
-            var fileContent = await JSInteropService.ReadFileContentAsync(JSDirectoryId, filename);
+            var fileContent = await FileReader.ReadFileAsync(filename);
             _usedFiles.Add(filename, fileContent);
         }
 

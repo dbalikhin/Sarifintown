@@ -9,12 +9,12 @@ namespace Sarifintown.Services
 {
     public class CodeSnippetService
     {
-        private readonly Sarifintown.Core.IFileReader _jsInteropService;
+        private readonly Sarifintown.Core.IFileReader _fileReader;
         private readonly LocalFilesService _localFilesService;
 
-        public CodeSnippetService(Sarifintown.Core.IFileReader jsInteropService, LocalFilesService localFilesService)
+        public CodeSnippetService(Sarifintown.Core.IFileReader fileReader, LocalFilesService localFilesService)
         {
-            _jsInteropService = jsInteropService;
+            _fileReader = fileReader;
             _localFilesService = localFilesService;
         }
 
@@ -50,7 +50,7 @@ namespace Sarifintown.Services
                                 // save adjusted path for furure references
                                 result.FilenamePath = adjustedPath;
 
-                                content = await _jsInteropService.ReadFileContentAsync(run.JSDirectoryId, adjustedPath);
+                                content = await _fileReader.ReadFileAsync(adjustedPath);
                                 if (string.IsNullOrEmpty(content))
                                 {
                                     return (false, $"Unable to read {result.FilenamePath}");

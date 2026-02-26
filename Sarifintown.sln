@@ -25,6 +25,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "workflows", "workflows", "{
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Core", "Sarifintown.Core\Sarifintown.Core.csproj", "{B2B08E1B-2B6F-4B1C-A3E1-87FB057F2A1F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.AgentEngine", "Sarifintown.AgentEngine\Sarifintown.AgentEngine.csproj", "{92D84CDA-6203-9FCF-A448-4BEAB5E92476}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -71,6 +73,18 @@ Global
 		{B2B08E1B-2B6F-4B1C-A3E1-87FB057F2A1F}.Release|x64.Build.0 = Release|Any CPU
 		{B2B08E1B-2B6F-4B1C-A3E1-87FB057F2A1F}.Release|x86.ActiveCfg = Release|Any CPU
 		{B2B08E1B-2B6F-4B1C-A3E1-87FB057F2A1F}.Release|x86.Build.0 = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|x64.Build.0 = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Debug|x86.Build.0 = Debug|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|Any CPU.Build.0 = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|x64.ActiveCfg = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|x64.Build.0 = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|x86.ActiveCfg = Release|Any CPU
+		{92D84CDA-6203-9FCF-A448-4BEAB5E92476}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -4,6 +4,7 @@ using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using MudBlazor;
 using MudBlazor.Services;
+using Sarifintown.Core;
 using Sarifintown.Services;
 
 namespace Sarifintown
@@ -21,8 +22,13 @@ namespace Sarifintown
             // Ensure IHttpClientFactory is registered
             builder.Services.AddHttpClient();
 
-            builder.Services.AddScoped<JSInteropService>();
-            builder.Services.AddScoped<Sarifintown.Core.IFileReader, JSInteropService>();
+            builder.Services.AddScoped<ITreeSitterEngine, BlazorTreeSitterEngineService>();
+
+            // Register the concrete class as Scoped(holds the state for the user's session)
+            builder.Services.AddScoped<BlazorFileReaderService>();
+
+            // Forward the interface to the SAME instance
+            builder.Services.AddScoped<IFileReader>(provider => provider.GetRequiredService<BlazorFileReaderService>());
 
             builder.Services.AddSingleton<KernelService>();
             builder.Services.AddSingleton<IChatCompletionService>(
