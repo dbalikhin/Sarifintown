@@ -179,6 +179,15 @@ namespace Sarifintown.Models
         [JsonPropertyName("id")]
         public int Id { get; set; }
 
+        [JsonPropertyName("message")]
+        public ResultLocationMessage Message { get; set; }
+
+        public class ResultLocationMessage
+        {
+            [JsonPropertyName("text")]
+            public string Text { get; set; }
+        }
+
         [JsonPropertyName("physicalLocation")]
         public PhysicalLocation PhysicalLocation { get; set; }
     }

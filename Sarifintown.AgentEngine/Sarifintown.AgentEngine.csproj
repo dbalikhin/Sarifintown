@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.ClearScript.V8" Version="7.5.0" />
+    <PackageReference Include="Microsoft.ClearScript.Complete" Version="7.5.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.3" />
     <PackageReference Include="ModelContextProtocol" Version="1.0.0" />
   </ItemGroup>
@@ -21,9 +21,7 @@
   </ItemGroup>
 
 <ItemGroup>
-	<Content Include="..\Sarifintown\wwwroot\js\tree-sitter\**\*.*"
-				Link="tree-sitter\%(RecursiveDir)%(Filename)%(Extension)"
-				CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="..\Sarifintown\wwwroot\js\tree-sitter\**\*.*" Link="tree-sitter\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 </Project>
