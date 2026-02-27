@@ -42,7 +42,7 @@ jobs:
 
     - name: Run Playwright E2E tests (Category=Playwright)
       run: |
-        dotnet test Sarifintown.Tests/Sarifintown.Tests.csproj \
+        dotnet test Sarifintown.Tests/Sarifintown.UI.Tests.csproj \
           --configuration Release \
           --no-build \
           --filter "Category=Playwright" \

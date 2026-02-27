@@ -1,6 +1,6 @@
-# MCP Setup Guide for `Sarifintown.AgentEngine`
+# MCP Setup Guide for `Sarifintown.Engine`
 
-This guide explains how to configure the `Sarifintown.AgentEngine` as an MCP server in AI IDEs.
+This guide explains how to configure the `Sarifintown.Engine` as an MCP server in AI IDEs.
 
 ## What the server does at startup
 
@@ -45,7 +45,7 @@ sarifintown
 ## Option B: run from source
 
 ```bash
-dotnet run --project Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj
+dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 ```
 
 ## Option C: run with alternate tool command (if present in your environment)
@@ -154,7 +154,7 @@ Notes:
 If `sarifintown` is not installed as a global tool:
 
 ```bash
-dotnet run --project Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj
+dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 ```
 
 ---
@@ -208,7 +208,7 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj
       "args": [
         "run",
         "--project",
-        "C:/dev/sarifintown/Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj"
+        "C:/dev/sarifintown/Sarifintown.AgentEngine/Sarifintown.Engine.csproj"
       ],
       "cwd": "C:/dev/sarifintown",
       "env": {

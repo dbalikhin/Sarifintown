@@ -23,7 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Sarifintown\Sarifintown.csproj" />
+    <ProjectReference Include="..\Sarifintown\Sarifintown.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>
