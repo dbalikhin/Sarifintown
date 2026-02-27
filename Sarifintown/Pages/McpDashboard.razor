@@ -18,6 +18,10 @@
         Send UI state to host
     </MudButton>
 
+    <MudButton Variant="Variant.Filled" Color="Color.Secondary" OnClick="AskAiToExplainAsync">
+        Ask AI to Explain This
+    </MudButton>
+
     <MudButton Variant="Variant.Outlined" Color="Color.Info" OnClick="NavigateToFiles">
         Open workspace SARIF view
     </MudButton>
@@ -70,6 +74,23 @@
             filesLoaded = SarifFileService.Count,
             timestampUtc = DateTime.UtcNow
         }, requestId);
+    }
+
+    private async Task AskAiToExplainAsync()
+    {
+        var accepted = await Bridge.RequestChatPromptAsync(
+            "Explain the vulnerability/code-flow currently displayed in the MCP dashboard. Prioritize exploitability, root cause, and a concrete remediation patch.",
+            new
+            {
+                source = "Sarifintown.McpDashboard",
+                route = "/mcp/dashboard",
+                filesLoaded = SarifFileService.Count,
+                requestedAtUtc = DateTime.UtcNow
+            });
+
+        _lastHostEvent = accepted
+            ? "host.chatPrompt.accepted"
+            : "host.chatPrompt.rejected";
     }
 
     private void NavigateToFiles()

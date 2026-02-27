@@ -270,7 +270,37 @@ Recommended message envelope for host ↔ UI:
 Common events:
 
 - Host -> UI: `host.ping`, `host.getState`
-- UI -> Host: `ui.ready`, `ui.pong`, `ui.state`
+- UI -> Host: `ui.ready`, `ui.pong`, `ui.state`, `ui.request.chatPrompt`
+
+`ui.request.chatPrompt` payload:
+
+```json
+{
+  "channel": "sarifintown.mcp.v1",
+  "type": "ui.request.chatPrompt",
+  "requestId": "optional-correlation-id",
+  "payload": {
+    "prompt": "Explain SQL injection at line 42 in auth.cs",
+    "context": {
+      "source": "Sarifintown.McpDashboard",
+      "route": "/mcp/dashboard"
+    }
+  }
+}
+```
+
+Recommended host response:
+
+```json
+{
+  "channel": "sarifintown.mcp.v1",
+  "type": "host.chatPrompt.ack",
+  "requestId": "same-request-id",
+  "payload": {
+    "accepted": true
+  }
+}
+```
 
 ---
 

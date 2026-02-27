@@ -3,6 +3,7 @@ window.mcpUiBridge = {
     channel: "sarifintown.mcp.v1",
     targetWindow: null,
     targetOrigin: "*",
+    hostOrigin: null,
     boundHandler: null,
 
     start(dotNetRef, options) {
@@ -11,6 +12,7 @@ window.mcpUiBridge = {
         this.dotNetRef = dotNetRef;
         this.channel = options?.channel || "sarifintown.mcp.v1";
         this.targetOrigin = options?.targetOrigin || "*";
+        this.hostOrigin = null;
         this.targetWindow = window.parent && window.parent !== window ? window.parent : window;
 
         this.boundHandler = (event) => this.handleMessage(event);
@@ -23,6 +25,7 @@ window.mcpUiBridge = {
         }
 
         this.boundHandler = null;
+        this.hostOrigin = null;
         this.dotNetRef = null;
     },
 
@@ -38,7 +41,8 @@ window.mcpUiBridge = {
             payload: payload || {}
         };
 
-        this.targetWindow.postMessage(envelope, this.targetOrigin);
+        const postTargetOrigin = this.hostOrigin || this.targetOrigin;
+        this.targetWindow.postMessage(envelope, postTargetOrigin);
     },
 
     handleMessage(event) {
@@ -46,6 +50,20 @@ window.mcpUiBridge = {
 
         if (!data || typeof data !== "object") {
             return;
+        }
+
+        if (this.targetOrigin !== "*" && event.origin !== this.targetOrigin) {
+            return;
+        }
+
+        if (this.targetOrigin === "*") {
+            if (!this.hostOrigin) {
+                this.hostOrigin = event.origin;
+            }
+
+            if (event.origin !== this.hostOrigin) {
+                return;
+            }
         }
 
         if (data.channel !== this.channel) {
