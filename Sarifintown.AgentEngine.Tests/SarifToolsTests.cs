@@ -43,6 +43,7 @@ namespace Sarifintown.AgentEngine.Tests
             SarifTools.FileReader = new FakeFileReader();
             SarifTools.TreeSitterEngine = new FakeTreeSitterEngine();
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
+            SarifTools.SetLocalUiBaseUrl(string.Empty);
         }
 
         [Test]
@@ -294,6 +295,22 @@ namespace Sarifintown.AgentEngine.Tests
             Assert.That(payload.GetProperty("uri").GetString(), Is.EqualTo("ui://sarifintown/mcp/dashboard"));
             Assert.That(payload.GetProperty("bridge").GetProperty("transport").GetString(), Is.EqualTo("postMessage"));
             Assert.That(payload.GetProperty("bridge").GetProperty("channel").GetString(), Is.EqualTo("sarifintown.mcp.v1"));
+            Assert.That(payload.GetProperty("local_http_ui").GetProperty("available").GetBoolean(), Is.False);
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithLocalUiBaseUrl_ReturnsLocalhostFallbackUri()
+        {
+            // Arrange
+            SarifTools.SetLocalUiBaseUrl("http://127.0.0.1:54321");
+
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Visual Studio Code");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("local_http_ui").GetProperty("available").GetBoolean(), Is.True);
+            Assert.That(payload.GetProperty("local_http_ui").GetProperty("uri").GetString(), Is.EqualTo("http://127.0.0.1:54321/mcp/dashboard"));
         }
 
         [Test]
