@@ -270,5 +270,96 @@ namespace Sarifintown.AgentEngine.Tests
                 File.Delete(outputPath);
             }
         }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithVsCodeHostHint_ReturnsUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Visual Studio Code");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("vscode-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithCursorHostHint_ReturnsUiUri()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Cursor");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("uri").GetString(), Is.EqualTo("ui://sarifintown/dashboard"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithClaudeHostHint_ReturnsSpectreTui()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Claude Code");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("tui").GetProperty("library").GetString(), Is.EqualTo("Spectre.Console"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("terminal-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithWindsurfHostHint_ReturnsIdeUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Windsurf");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithRiderHostHint_ReturnsIdeUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "JetBrains Rider");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("jetbrains-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithPowerShellHostHint_ReturnsCliTuiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "PowerShell");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("cli-tui"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithUnknownHostHint_DoesNotSetFallbackUsed()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Some Future MCP Host");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("fallback_used").GetBoolean(), Is.False);
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithEmptyHint_UsesFallback()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("fallback_used").GetBoolean(), Is.True);
+        }
     }
 }
