@@ -47,6 +47,15 @@ namespace Sarifintown.Models
 
         [JsonIgnore]
         public List<RuleWithCount> UsedRules { get; set; }
+
+        [JsonIgnore]
+        public Dictionary<string, HashSet<string>> ResultIdentityBySeverity { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public Dictionary<string, HashSet<string>> ResultIdentityByRuleId { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public HashSet<string> AllResultIdentities { get; set; } = new(StringComparer.Ordinal);
     }
 
     public class UriBaseId
@@ -176,10 +185,19 @@ namespace Sarifintown.Models
         public string FilenamePath { get; set; }
 
         [JsonIgnore]
+        public string OriginalFilenamePath { get; set; }
+
+        [JsonIgnore]
         public string FilenameExt { get; set; }
 
         [JsonIgnore]
         public Rule Rule { get; set; }
+
+        [JsonIgnore]
+        public string ResultIdentity { get; set; }
+
+        [JsonIgnore]
+        public bool IsSnippetLoaded { get; set; }
 
         [JsonIgnore]
         public Run ParentRun { get; set; }
