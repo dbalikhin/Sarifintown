@@ -1,7 +1,5 @@
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
-using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.ChatCompletion;
 using MudBlazor;
 using MudBlazor.Services;
 using Sarifintown.Core;
@@ -19,9 +17,6 @@ namespace Sarifintown
 
             builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
 
-            // Ensure IHttpClientFactory is registered
-            builder.Services.AddHttpClient();
-
             builder.Services.AddScoped<ITreeSitterEngine, BlazorTreeSitterEngineService>();
 
             // Register the concrete class as Scoped(holds the state for the user's session)
@@ -29,11 +24,6 @@ namespace Sarifintown
 
             // Forward the interface to the SAME instance
             builder.Services.AddScoped<IFileReader>(provider => provider.GetRequiredService<BlazorFileReaderService>());
-
-            builder.Services.AddSingleton<KernelService>();
-            builder.Services.AddSingleton<IChatCompletionService>(
-                sp => sp.GetRequiredService<IChatCompletionService>()
-            );
 
             builder.Services.AddMudServices(config =>
             {
@@ -56,14 +46,7 @@ namespace Sarifintown
             builder.Services.AddScoped<McpUiBridgeService>();
             builder.Services.AddScoped<McpAgentToolClientService>();
 
-            var host = builder.Build();
-
-            // Initialize the service after the host is built but before it runs
-            var kernelService = host.Services.GetRequiredService<KernelService>();
-
-            await kernelService.InitializeAsync();
-
-            await host.RunAsync();
+            await builder.Build().RunAsync();
         }
     }
 }

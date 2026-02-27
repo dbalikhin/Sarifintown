@@ -18,7 +18,6 @@ MCP server support is available via `Sarifintown.Engine`; see the concise setup 
 - Extract and highlight code snippets for each finding with PrismJS.
 - Show full code flows.
 - Extract whole methods with Tree-sitter WASM grammars to improve code flow analysis.
-- AI Chat integration using Semantic Kernel for intelligent code analysis.
 - Responsive UI built with MudBlazor.
 - Group and filter results by severity, rule and file path.
 
