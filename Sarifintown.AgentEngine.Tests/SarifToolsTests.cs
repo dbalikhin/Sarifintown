@@ -42,6 +42,74 @@ namespace Sarifintown.AgentEngine.Tests
         {
             SarifTools.FileReader = new FakeFileReader();
             SarifTools.TreeSitterEngine = new FakeTreeSitterEngine();
+            SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
+        }
+
+        [Test]
+        public async Task LoadAndFilterSarif_WithDiscoveredFileName_ResolvesAndParsesFile()
+        {
+            // Arrange
+            var sarifContent = @"
+            {
+                ""runs"": [
+                    {
+                        ""results"": [
+                            {
+                                ""ruleId"": ""RULE-DISCOVERED"",
+                                ""level"": ""warning"",
+                                ""message"": { ""text"": ""From discovered file"" }
+                            }
+                        ]
+                    }
+                ]
+            }";
+
+            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirectory);
+            var tempFile = Path.Combine(tempDirectory, "scan.sarif");
+            File.WriteAllText(tempFile, sarifContent);
+            SarifTools.SetDiscoveredSarifFiles(new[] { tempFile });
+
+            try
+            {
+                // Act
+                var result = await SarifTools.LoadAndFilterSarif("scan.sarif");
+
+                // Assert
+                Assert.That(result, Contains.Substring("RULE-DISCOVERED"));
+            }
+            finally
+            {
+                Directory.Delete(tempDirectory, true);
+            }
+        }
+
+        [Test]
+        public void ListWorkspaceSarifFiles_WithDiscoveredFiles_ReturnsSerializedList()
+        {
+            // Arrange
+            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirectory);
+            var fileOne = Path.Combine(tempDirectory, "a.sarif");
+            var fileTwo = Path.Combine(tempDirectory, "b.sarif");
+            File.WriteAllText(fileOne, "{}");
+            File.WriteAllText(fileTwo, "{}");
+            SarifTools.SetDiscoveredSarifFiles(new[] { fileOne, fileTwo });
+
+            try
+            {
+                // Act
+                var json = SarifTools.ListWorkspaceSarifFiles();
+                var parsed = JsonSerializer.Deserialize<List<JsonElement>>(json);
+
+                // Assert
+                Assert.That(parsed, Is.Not.Null);
+                Assert.That(parsed!.Count, Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(tempDirectory, true);
+            }
         }
 
         [Test]
@@ -201,6 +269,99 @@ namespace Sarifintown.AgentEngine.Tests
             {
                 File.Delete(outputPath);
             }
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithVsCodeHostHint_ReturnsUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Visual Studio Code");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("vscode-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithCursorHostHint_ReturnsUiUri()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Cursor");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("uri").GetString(), Is.EqualTo("ui://sarifintown/mcp/dashboard"));
+            Assert.That(payload.GetProperty("bridge").GetProperty("transport").GetString(), Is.EqualTo("postMessage"));
+            Assert.That(payload.GetProperty("bridge").GetProperty("channel").GetString(), Is.EqualTo("sarifintown.mcp.v1"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithClaudeHostHint_ReturnsSpectreTui()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Claude Code");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("tui").GetProperty("library").GetString(), Is.EqualTo("Spectre.Console"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("terminal-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithWindsurfHostHint_ReturnsIdeUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Windsurf");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithRiderHostHint_ReturnsIdeUiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "JetBrains Rider");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("ide-ui"));
+            Assert.That(payload.GetProperty("host_family").GetString(), Is.EqualTo("jetbrains-family"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithPowerShellHostHint_ReturnsCliTuiMode()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "PowerShell");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("mode").GetString(), Is.EqualTo("cli-tui"));
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithUnknownHostHint_DoesNotSetFallbackUsed()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "Some Future MCP Host");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("fallback_used").GetBoolean(), Is.False);
+        }
+
+        [Test]
+        public void ResolveInteractiveSurface_WithEmptyHint_UsesFallback()
+        {
+            // Act
+            var result = SarifTools.ResolveInteractiveSurface(null!, hostHint: "");
+            var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+            // Assert
+            Assert.That(payload.GetProperty("fallback_used").GetBoolean(), Is.True);
         }
     }
 }

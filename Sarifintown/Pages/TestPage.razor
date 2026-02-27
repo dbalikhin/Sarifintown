@@ -27,6 +27,7 @@
         try
         {
             // Initialize Tree-sitter Web Worker
+            await JS.InvokeVoidAsync("scriptLoader.ensure", "/js/tree-sitter-interop.js");
             await JS.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
             output = "Tree-sitter worker initialized successfully.";
             isInitialized = true;

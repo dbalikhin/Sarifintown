@@ -14,6 +14,7 @@ namespace Sarifintown.Services
 
         public async Task InitializeAsync()
         {
+            await _jsRuntime.InvokeVoidAsync("scriptLoader.ensure", "/js/tree-sitter-interop.js");
             await _jsRuntime.InvokeVoidAsync("TreeSitterInterop.initializeWorker");
         }
 

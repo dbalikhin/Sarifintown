@@ -1,10 +1,21 @@
 ﻿
+@using Sarifintown.Services
+@inject AppModeService AppModeService
+
 <MudNavMenu>
-    <MudNavLink Href="/" Match="NavLinkMatch.All" Icon="@Icons.Material.Filled.UploadFile">Import SARIF</MudNavLink>
-    <MudNavLink Href="analysis" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Pageview">View Results</MudNavLink>
-    <MudNavLink Href="aichat" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Pageview">AI Chat</MudNavLink>
-    @*<MudNavLink Href="testpage" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Construction">Test Page</MudNavLink>*@
-    <MudNavLink Href="settings" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Settings">Settings</MudNavLink>
+    @if (AppModeService.IsMcpHosted)
+    {
+        <MudNavLink Href="mcp/dashboard" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Dashboard">MCP Dashboard</MudNavLink>
+        <MudNavLink Href="mcp/files" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Folder">Workspace SARIF</MudNavLink>
+    }
+    else
+    {
+        <MudNavLink Href="/" Match="NavLinkMatch.All" Icon="@Icons.Material.Filled.UploadFile">Import SARIF</MudNavLink>
+        <MudNavLink Href="analysis" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Pageview">View Results</MudNavLink>
+        <MudNavLink Href="aichat" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Pageview">AI Chat</MudNavLink>
+        @*<MudNavLink Href="testpage" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Construction">Test Page</MudNavLink>*@
+        <MudNavLink Href="settings" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Filled.Settings">Settings</MudNavLink>
+    }
     @*
     <MudNavGroup Title="Settings" Icon="@Icons.Material.Filled.Settings">
         <MudNavLink Href="/" Icon="@Icons.Material.Filled.Place" IconColor="Color.Info">Placeholder</MudNavLink>

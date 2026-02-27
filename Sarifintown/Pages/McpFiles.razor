@@ -1,0 +1,75 @@
+@page "/mcp/files"
+@using Sarifintown.Services
+
+@inject McpAgentToolClientService ToolClient
+
+<PageTitle>MCP Workspace SARIF</PageTitle>
+
+<MudStack Spacing="2">
+    <MudText Typo="Typo.h5">Workspace SARIF Files</MudText>
+
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="LoadFilesAsync" Disabled="_loading">
+        Refresh from AgentEngine
+    </MudButton>
+
+    @if (!string.IsNullOrWhiteSpace(_error))
+    {
+        <MudAlert Severity="Severity.Error">@_error</MudAlert>
+    }
+
+    @if (_loading)
+    {
+        <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+    }
+
+    @if (_files.Count == 0 && !_loading && string.IsNullOrWhiteSpace(_error))
+    {
+        <MudText Typo="Typo.body2">No SARIF files reported by host.</MudText>
+    }
+
+    @if (_files.Count > 0)
+    {
+        <MudList T="McpSarifFileDescriptor">
+            @foreach (var file in _files)
+            {
+                <MudListItem Text="@($"{file.Name} — {file.Path}")" />
+            }
+        </MudList>
+    }
+</MudStack>
+
+@code {
+    private readonly List<McpSarifFileDescriptor> _files = new();
+    private bool _loading;
+    private string _error = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadFilesAsync();
+    }
+
+    private async Task LoadFilesAsync()
+    {
+        _loading = true;
+        _error = string.Empty;
+
+        try
+        {
+            var files = await ToolClient.ListWorkspaceSarifFilesAsync();
+            _files.Clear();
+            _files.AddRange(files);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (TaskCanceledException)
+        {
+            _error = "Request timed out while waiting for host response.";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

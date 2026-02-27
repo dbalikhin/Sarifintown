@@ -102,6 +102,7 @@
 
     private async Task SelectDirectoryAsync()
     {
+        await JS.InvokeVoidAsync("scriptLoader.ensure", "/js/fileReader.js");
         var result = await JS.InvokeAsync<DirectoryPickerResult>("fileSystemHelpers.getDirectoryHandle");
 
         if (result != null)
