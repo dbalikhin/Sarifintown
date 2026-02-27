@@ -13,6 +13,42 @@ namespace Sarifintown.AgentEngine
         // Dependencies to be injected at startup in Program.cs
         public static IFileReader? FileReader { get; set; }
         public static ITreeSitterEngine? TreeSitterEngine { get; set; }
+        private static readonly object SyncRoot = new();
+        private static List<string> _discoveredSarifFiles = new();
+
+        public static void SetDiscoveredSarifFiles(IEnumerable<string> discoveredSarifFiles)
+        {
+            ArgumentNullException.ThrowIfNull(discoveredSarifFiles);
+
+            lock (SyncRoot)
+            {
+                _discoveredSarifFiles = discoveredSarifFiles
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Select(Path.GetFullPath)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+        }
+
+        [McpServerTool]
+        [Description("Returns all SARIF files discovered in the current workspace .sarif folder at server startup.")]
+        public static string ListWorkspaceSarifFiles()
+        {
+            List<string> files;
+            lock (SyncRoot)
+            {
+                files = _discoveredSarifFiles.ToList();
+            }
+
+            var payload = files.Select(path => new
+            {
+                name = Path.GetFileName(path),
+                path
+            });
+
+            return JsonSerializer.Serialize(payload);
+        }
 
         [McpServerTool]
         [Description("Parses a SARIF file and filters security issues by category, severity, or rule ID. Returns a JSON list of matching issues.")]
@@ -24,12 +60,14 @@ namespace Sarifintown.AgentEngine
         {
             if (FileReader == null) throw new InvalidOperationException("FileReader is not initialized.");
 
-            if (!File.Exists(sarifPath))
+            var resolvedSarifPath = ResolveSarifPath(sarifPath);
+
+            if (!File.Exists(resolvedSarifPath))
                 return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
 
             try
             {
-                var content = await FileReader.ReadFileAsync(sarifPath);
+                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
                 var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
                 if (sarifLog?.Runs == null || !sarifLog.Runs.Any())
@@ -75,9 +113,14 @@ namespace Sarifintown.AgentEngine
             if (FileReader == null || TreeSitterEngine == null)
                 throw new InvalidOperationException("Core engines are not initialized.");
 
+            var resolvedSarifPath = ResolveSarifPath(sarifPath);
+
             try
             {
-                var content = await FileReader.ReadFileAsync(sarifPath);
+                if (!File.Exists(resolvedSarifPath))
+                    return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
+
+                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
                 var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 var allResults = sarifLog?.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<Result>()).ToList();
 
@@ -177,6 +220,35 @@ namespace Sarifintown.AgentEngine
                 ".sql" => "sql",
                 _ => "csharp" // default
             };
+        }
+
+        private static string ResolveSarifPath(string sarifPath)
+        {
+            if (Path.IsPathRooted(sarifPath))
+            {
+                return sarifPath;
+            }
+
+            lock (SyncRoot)
+            {
+                var matchByFullPath = _discoveredSarifFiles.FirstOrDefault(path =>
+                    string.Equals(path, sarifPath, StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrWhiteSpace(matchByFullPath))
+                {
+                    return matchByFullPath;
+                }
+
+                var matchByFileName = _discoveredSarifFiles.FirstOrDefault(path =>
+                    string.Equals(Path.GetFileName(path), sarifPath, StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrWhiteSpace(matchByFileName))
+                {
+                    return matchByFileName;
+                }
+            }
+
+            return sarifPath;
         }
 
         [McpServerTool]

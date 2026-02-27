@@ -5,8 +5,10 @@ using Sarifintown.Core;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+var discovery = WorkspaceSarifDiscovery.Discover();
+
 // Register Headless Implementations
-builder.Services.AddSingleton<IFileReader>(new NativeFileReader(Directory.GetCurrentDirectory()));
+builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
 
 // Register MCP Server (if using the prerelease SDK)
@@ -23,5 +25,6 @@ await treeSitter.InitializeAsync();
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
 SarifTools.TreeSitterEngine = treeSitter;
+SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 
 await app.RunAsync();

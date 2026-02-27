@@ -42,6 +42,74 @@ namespace Sarifintown.AgentEngine.Tests
         {
             SarifTools.FileReader = new FakeFileReader();
             SarifTools.TreeSitterEngine = new FakeTreeSitterEngine();
+            SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
+        }
+
+        [Test]
+        public async Task LoadAndFilterSarif_WithDiscoveredFileName_ResolvesAndParsesFile()
+        {
+            // Arrange
+            var sarifContent = @"
+            {
+                ""runs"": [
+                    {
+                        ""results"": [
+                            {
+                                ""ruleId"": ""RULE-DISCOVERED"",
+                                ""level"": ""warning"",
+                                ""message"": { ""text"": ""From discovered file"" }
+                            }
+                        ]
+                    }
+                ]
+            }";
+
+            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirectory);
+            var tempFile = Path.Combine(tempDirectory, "scan.sarif");
+            File.WriteAllText(tempFile, sarifContent);
+            SarifTools.SetDiscoveredSarifFiles(new[] { tempFile });
+
+            try
+            {
+                // Act
+                var result = await SarifTools.LoadAndFilterSarif("scan.sarif");
+
+                // Assert
+                Assert.That(result, Contains.Substring("RULE-DISCOVERED"));
+            }
+            finally
+            {
+                Directory.Delete(tempDirectory, true);
+            }
+        }
+
+        [Test]
+        public void ListWorkspaceSarifFiles_WithDiscoveredFiles_ReturnsSerializedList()
+        {
+            // Arrange
+            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirectory);
+            var fileOne = Path.Combine(tempDirectory, "a.sarif");
+            var fileTwo = Path.Combine(tempDirectory, "b.sarif");
+            File.WriteAllText(fileOne, "{}");
+            File.WriteAllText(fileTwo, "{}");
+            SarifTools.SetDiscoveredSarifFiles(new[] { fileOne, fileTwo });
+
+            try
+            {
+                // Act
+                var json = SarifTools.ListWorkspaceSarifFiles();
+                var parsed = JsonSerializer.Deserialize<List<JsonElement>>(json);
+
+                // Assert
+                Assert.That(parsed, Is.Not.Null);
+                Assert.That(parsed!.Count, Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(tempDirectory, true);
+            }
         }
 
         [Test]

@@ -2,6 +2,8 @@
 
 Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysis Results Interchange Format) files and extracting code snippets from source code. 
 
+MCP server support is available via `Sarifintown.AgentEngine`; see the concise setup guide in [`MCP_SETUP.md`](MCP_SETUP.md).
+
 ## Projects
 
 - **Sarifintown**: Blazor WebAssembly app for SARIF analysis and code snippet extraction.
