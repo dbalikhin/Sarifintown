@@ -32,5 +32,59 @@ namespace Sarifintown.Core.Tests
             Assert.That(result.adjustedPath, Is.EqualTo("src/file.cs"));
             Assert.That(result.matchedFolder, Is.EqualTo(folder));
         }
+
+        [Test]
+        public void ResolveArtifactPath_WithOriginalUriBaseId_CombinesToAbsoluteFilePath()
+        {
+            var run = new Run
+            {
+                OriginalUriBaseIds = new Dictionary<string, UriBaseId>
+                {
+                    ["SRCROOT"] = new UriBaseId { Uri = "file:///repo/" }
+                }
+            };
+
+            var artifact = new PhysicalLocation.PhysicalLocationArtifactLocation
+            {
+                Uri = "src/auth.cs",
+                UriBaseId = "SRCROOT"
+            };
+
+            var resolved = FileHelper.ResolveArtifactPath(artifact, run);
+
+            Assert.That(resolved, Is.EqualTo("repo/src/auth.cs"));
+        }
+
+        [Test]
+        public void ResolveArtifactPath_WithArtifactIndex_UsesIndexedLocation()
+        {
+            var run = new Run
+            {
+                Artifacts = new List<Artifact>
+                {
+                    new Artifact
+                    {
+                        Location = new PhysicalLocation.PhysicalLocationArtifactLocation
+                        {
+                            Uri = "src/file.cs"
+                        }
+                    }
+                }
+            };
+
+            var artifact = new PhysicalLocation.PhysicalLocationArtifactLocation { Index = 0 };
+
+            var resolved = FileHelper.ResolveArtifactPath(artifact, run);
+
+            Assert.That(resolved, Is.EqualTo("src/file.cs"));
+        }
+
+        [Test]
+        public void RebaseToWorkspaceRelativePath_WithWorkspaceFolder_ReturnsRelativePart()
+        {
+            var rebased = FileHelper.RebaseToWorkspaceRelativePath("C:/repo/src/a.cs", "repo");
+
+            Assert.That(rebased, Is.EqualTo("src/a.cs"));
+        }
     }
 }

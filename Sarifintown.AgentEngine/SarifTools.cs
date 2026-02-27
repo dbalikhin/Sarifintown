@@ -1,5 +1,6 @@
 ﻿using ModelContextProtocol.Server;
 using Sarifintown.Core;
+using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
 using System.Reflection;
@@ -243,12 +244,16 @@ namespace Sarifintown.AgentEngine
 
                 var content = await FileReader.ReadFileAsync(resolvedSarifPath);
                 var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                var allResults = sarifLog?.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<Result>()).ToList();
+                var flattenedResults = sarifLog?.Runs
+                    .SelectMany(run => (run.Results ?? Enumerable.Empty<Result>()).Select(result => (run, result)))
+                    .ToList();
 
-                if (allResults == null || !int.TryParse(resultId, out int index) || index < 0 || index >= allResults.Count)
+                if (flattenedResults == null || !int.TryParse(resultId, out int index) || index < 0 || index >= flattenedResults.Count)
                     return JsonSerializer.Serialize(new { error = "Invalid resultId or result not found." });
 
-                var targetResult = allResults[index];
+                var targetPair = flattenedResults[index];
+                var targetResult = targetPair.result;
+                var targetRun = targetPair.run;
 
                 if (targetResult.CodeFlows == null || !targetResult.CodeFlows.Any())
                     return JsonSerializer.Serialize(new { message = "No code flow trace is available in the SARIF log for this issue." });
@@ -266,7 +271,11 @@ namespace Sarifintown.AgentEngine
                         var relativePath = physLoc.ArtifactLocation?.Uri;
                         if (string.IsNullOrEmpty(relativePath)) continue;
 
-                        var fullPath = Path.Combine(sourceCodeRoot, relativePath.Replace("file://", "").TrimStart('/'));
+                        var resolvedPath = FileHelper.ResolveArtifactPath(physLoc.ArtifactLocation, targetRun);
+                        var fullPath = Path.IsPathRooted(resolvedPath)
+                            ? resolvedPath
+                            : Path.Combine(sourceCodeRoot, (resolvedPath ?? relativePath).Replace("file://", "").TrimStart('/'));
+
                         string snippetCode = "Source file unavailable";
 
                         if (File.Exists(fullPath))

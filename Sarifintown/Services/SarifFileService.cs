@@ -1,4 +1,5 @@
 ﻿using Sarifintown.Models;
+using Sarifintown.Helpers;
 
 namespace Sarifintown.Services
 {
@@ -11,7 +12,12 @@ namespace Sarifintown.Services
         public bool AddSarifFile(SarifFile sarifFile, int jsDirectoryId = 0)
         {
             if (!_sarifFiles.Contains(sarifFile))
-            {       
+            {
+                foreach (var run in sarifFile.SarifLog.Runs ?? Enumerable.Empty<Run>())
+                {
+                    run.JSDirectoryId = jsDirectoryId;
+                }
+
                 AddFilenamePathAndExt(sarifFile.SarifLog);
                 UseRuleDictionary(sarifFile.SarifLog);
                 CalculateLevelStats(sarifFile.SarifLog);
@@ -48,8 +54,8 @@ namespace Sarifintown.Services
         {
             foreach (var run in sarifLog.Runs)
             {
-                var rules = run.Tool.Driver.Rule;
-                var results = run.Results;
+                var rules = run.Tool?.Driver?.Rule ?? new List<Rule>();
+                var results = run.Results ?? new List<Result>();
 
                 for (int i = 0; i < rules.Count; i++)
                 {
@@ -75,15 +81,21 @@ namespace Sarifintown.Services
 
         private void AddFilenamePathAndExt(SarifLog sarifLog)
         {
-            sarifLog.Runs
-                .SelectMany(run => run.Results)
-                .Where(result => result.Locations.Any())
-                .ToList()
-                .ForEach(result =>
+            foreach (var run in sarifLog.Runs ?? Enumerable.Empty<Run>())
+            {
+                foreach (var result in run.Results?.Where(r => r.Locations?.Any() == true) ?? Enumerable.Empty<Result>())
                 {
-                    result.FilenamePath = result.Locations[0].PhysicalLocation.ArtifactLocation.Uri;
+                    result.ParentRun = run;
+
+                    var firstLocation = result.Locations[0]?.PhysicalLocation?.ArtifactLocation;
+                    var resolvedPath = FileHelper.ResolveArtifactPath(firstLocation, run);
+                    result.FilenamePath = string.IsNullOrWhiteSpace(resolvedPath)
+                        ? firstLocation?.Uri
+                        : resolvedPath;
+
                     result.FilenameExt = Path.GetExtension(result.FilenamePath)?.TrimStart('.');
-                });
+                }
+            }
         }
 
         private void CalculateLevelStats(SarifLog sarifLog)
@@ -96,10 +108,10 @@ namespace Sarifintown.Services
                     int noteCount = 0;
 
                     // Dictionary to look up default level for each rule
-                    var ruleDefaultLevels = run.Tool.Driver.Rule
+                    var ruleDefaultLevels = (run.Tool?.Driver?.Rule ?? new List<Rule>())
                         .ToDictionary(rule => rule.Id, rule => rule.DefaultConfiguration?.Level ?? "warning");
 
-                    run.Results.ForEach(result =>
+                    (run.Results ?? new List<Result>()).ForEach(result =>
                     {
                         if (string.IsNullOrEmpty(result.Level))
                         {

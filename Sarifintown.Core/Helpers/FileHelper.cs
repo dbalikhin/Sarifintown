@@ -38,6 +38,96 @@ namespace Sarifintown.Helpers
             return string.Join("/", stack.Reverse());
         }
 
+        /// <summary>
+        /// Resolves a SARIF artifact location to a normalized path by using URI, artifact index and originalUriBaseIds.
+        /// </summary>
+        public static string ResolveArtifactPath(PhysicalLocation.PhysicalLocationArtifactLocation artifactLocation, Run run)
+        {
+            ArgumentNullException.ThrowIfNull(run);
+
+            if (artifactLocation == null)
+            {
+                return string.Empty;
+            }
+
+            var uri = artifactLocation.Uri;
+            var uriBaseId = artifactLocation.UriBaseId;
+
+            if ((string.IsNullOrWhiteSpace(uri) || string.IsNullOrWhiteSpace(uriBaseId))
+                && artifactLocation.Index.HasValue
+                && run.Artifacts != null
+                && artifactLocation.Index.Value >= 0
+                && artifactLocation.Index.Value < run.Artifacts.Count)
+            {
+                var indexedLocation = run.Artifacts[artifactLocation.Index.Value]?.Location;
+                if (indexedLocation != null)
+                {
+                    uri = string.IsNullOrWhiteSpace(uri) ? indexedLocation.Uri : uri;
+                    uriBaseId = string.IsNullOrWhiteSpace(uriBaseId) ? indexedLocation.UriBaseId : uriBaseId;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(uri))
+            {
+                return string.Empty;
+            }
+
+            if (Uri.TryCreate(uri, UriKind.Absolute, out var absoluteUri))
+            {
+                if (absoluteUri.Scheme.Equals("file", StringComparison.OrdinalIgnoreCase))
+                {
+                    return NormalizePath(absoluteUri.LocalPath);
+                }
+
+                return NormalizePath(absoluteUri.LocalPath);
+            }
+
+            if (!string.IsNullOrWhiteSpace(uriBaseId)
+                && run.OriginalUriBaseIds != null
+                && run.OriginalUriBaseIds.TryGetValue(uriBaseId, out var baseInfo))
+            {
+                var basePath = ResolveBasePathFromOriginalUriBaseIds(baseInfo, run.OriginalUriBaseIds);
+                if (!string.IsNullOrWhiteSpace(basePath))
+                {
+                    if (Uri.TryCreate(basePath, UriKind.Absolute, out var baseUri) &&
+                        Uri.TryCreate(baseUri, uri, out var combinedUri))
+                    {
+                        if (combinedUri.Scheme.Equals("file", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return NormalizePath(combinedUri.LocalPath);
+                        }
+
+                        return NormalizePath(combinedUri.LocalPath);
+                    }
+
+                    var combinedPath = Path.Combine(basePath.Replace('/', Path.DirectorySeparatorChar), uri.Replace('/', Path.DirectorySeparatorChar));
+                    return NormalizePath(combinedPath);
+                }
+            }
+
+            return NormalizePath(uri);
+        }
+
+        /// <summary>
+        /// Rebases a normalized path to a workspace-relative path by folder segment name.
+        /// </summary>
+        public static string RebaseToWorkspaceRelativePath(string normalizedPath, string workspaceFolderName)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedPath) || string.IsNullOrWhiteSpace(workspaceFolderName))
+            {
+                return normalizedPath;
+            }
+
+            var segments = normalizedPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var workspaceIndex = LastIndexOfSegment(segments, workspaceFolderName);
+            if (workspaceIndex < 0 || workspaceIndex >= segments.Length - 1)
+            {
+                return normalizedPath;
+            }
+
+            return string.Join('/', segments.Skip(workspaceIndex + 1));
+        }
+
         public static (string adjustedPath, DirectoryPicker matchedFolder) AdjustPathToGrantedFolder(
             string normalizedSarifPath,
             IEnumerable<DirectoryPicker> accessibleFolders,
@@ -167,6 +257,40 @@ namespace Sarifintown.Helpers
                     return i;
             }
             return -1;
+        }
+
+        private static string ResolveBasePathFromOriginalUriBaseIds(UriBaseId baseInfo, IDictionary<string, UriBaseId> allBaseIds)
+        {
+            if (baseInfo == null || string.IsNullOrWhiteSpace(baseInfo.Uri))
+            {
+                return string.Empty;
+            }
+
+            var baseUri = baseInfo.Uri;
+            if (string.IsNullOrWhiteSpace(baseInfo.ParentUriBaseId))
+            {
+                return baseUri;
+            }
+
+            if (!allBaseIds.TryGetValue(baseInfo.ParentUriBaseId, out var parentInfo))
+            {
+                return baseUri;
+            }
+
+            var parentBasePath = ResolveBasePathFromOriginalUriBaseIds(parentInfo, allBaseIds);
+            if (string.IsNullOrWhiteSpace(parentBasePath))
+            {
+                return baseUri;
+            }
+
+            if (Uri.TryCreate(parentBasePath, UriKind.Absolute, out var parentUri)
+                && Uri.TryCreate(parentUri, baseUri, out var combinedUri))
+            {
+                return combinedUri.ToString();
+            }
+
+            var combinedPath = Path.Combine(parentBasePath.Replace('/', Path.DirectorySeparatorChar), baseUri.Replace('/', Path.DirectorySeparatorChar));
+            return NormalizePath(combinedPath);
         }
 
         private sealed class FlexMatch

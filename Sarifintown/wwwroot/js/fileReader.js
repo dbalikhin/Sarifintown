@@ -196,6 +196,73 @@ window.fileSystemHelpers = {
         return sarifFiles;
     },
 
+    async readTextFile(directoryId, relativePath) {
+        const directoryHandle = this.directoryHandles[directoryId];
+        if (!directoryHandle)
+            throw new Error('Invalid directory handle.');
+
+        const normalizedPath = (relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!normalizedPath)
+            throw new Error('relativePath is required.');
+
+        const segments = normalizedPath.split('/');
+        let currentHandle = directoryHandle;
+
+        for (let i = 0; i < segments.length; i++) {
+            const isLastSegment = i === segments.length - 1;
+            const segmentName = segments[i];
+
+            if (isLastSegment) {
+                try {
+                    const fileHandle = await currentHandle.getFileHandle(segmentName, { create: false });
+                    const file = await fileHandle.getFile();
+                    return await file.text();
+                } catch {
+                    return null;
+                }
+            }
+
+            try {
+                currentHandle = await currentHandle.getDirectoryHandle(segmentName, { create: false });
+            } catch {
+                return null;
+            }
+        }
+
+        return null;
+    },
+
+    async writeTextFile(directoryId, relativePath, content) {
+        const directoryHandle = this.directoryHandles[directoryId];
+        if (!directoryHandle)
+            throw new Error('Invalid directory handle.');
+
+        const normalizedPath = (relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!normalizedPath)
+            throw new Error('relativePath is required.');
+
+        const directoryPermission = await directoryHandle.queryPermission({ mode: 'readwrite' });
+        if (directoryPermission === 'denied') {
+            const requestResult = await directoryHandle.requestPermission({ mode: 'readwrite' });
+            if (requestResult !== 'granted') {
+                throw new Error('Write permission was denied.');
+            }
+        }
+
+        const segments = normalizedPath.split('/');
+        let currentHandle = directoryHandle;
+
+        for (let i = 0; i < segments.length - 1; i++) {
+            currentHandle = await currentHandle.getDirectoryHandle(segments[i], { create: true });
+        }
+
+        const fileName = segments[segments.length - 1];
+        const fileHandle = await currentHandle.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(content ?? '');
+        await writable.close();
+    },
+
     
     async canAccessSubfolder(directoryId, subfolderName) {
         try {
