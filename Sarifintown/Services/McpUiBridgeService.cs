@@ -6,6 +6,8 @@ namespace Sarifintown.Services
 {
     public sealed class McpUiBridgeService : IAsyncDisposable
     {
+        public const string ChatPromptRequestMessageType = "ui.request.chatPrompt";
+
         private readonly IJSRuntime _jsRuntime;
         private DotNetObjectReference<McpUiBridgeService>? _dotNetReference;
         private bool _isInitialized;
@@ -28,6 +30,38 @@ namespace Sarifintown.Services
             _dotNetReference = DotNetObjectReference.Create(this);
             await _jsRuntime.InvokeVoidAsync("mcpUiBridge.start", _dotNetReference, new { channel, targetOrigin });
             _isInitialized = true;
+        }
+
+        /// <summary>
+        /// Requests the host IDE extension to inject a prompt into native chat.
+        /// </summary>
+        public async Task<bool> RequestChatPromptAsync(
+            string prompt,
+            object? context = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                throw new ArgumentException("Prompt must not be empty.", nameof(prompt));
+            }
+
+            var envelope = await RequestAsync(
+                ChatPromptRequestMessageType,
+                new
+                {
+                    prompt = prompt.Trim(),
+                    context = context ?? new { }
+                },
+                cancellationToken: cancellationToken);
+
+            if (envelope.Payload.ValueKind == JsonValueKind.Object
+                && envelope.Payload.TryGetProperty("accepted", out var acceptedElement)
+                && acceptedElement.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         public ValueTask SendAsync(string type, object? payload = null, string? requestId = null)

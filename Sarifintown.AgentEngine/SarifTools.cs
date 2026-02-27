@@ -15,6 +15,7 @@ namespace Sarifintown.AgentEngine
         public static ITreeSitterEngine? TreeSitterEngine { get; set; }
         private static readonly object SyncRoot = new();
         private static List<string> _discoveredSarifFiles = new();
+        private static string _localUiBaseUrl = string.Empty;
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -87,6 +88,14 @@ namespace Sarifintown.AgentEngine
             }
         }
 
+        public static void SetLocalUiBaseUrl(string localUiBaseUrl)
+        {
+            lock (SyncRoot)
+            {
+                _localUiBaseUrl = localUiBaseUrl?.Trim() ?? string.Empty;
+            }
+        }
+
         [McpServerTool]
         [Description("Returns all SARIF files discovered in the current workspace .sarif folder at server startup.")]
         public static string ListWorkspaceSarifFiles()
@@ -126,6 +135,7 @@ namespace Sarifintown.AgentEngine
                     mode,
                     host_family = hostFamily,
                     uri = "ui://sarifintown/mcp/dashboard",
+                    local_http_ui = CreateLocalHttpUiPayload(),
                     bridge = new
                     {
                         transport = "postMessage",
@@ -151,6 +161,7 @@ namespace Sarifintown.AgentEngine
                 mode,
                 host_family = hostFamily,
                 fallback_used = usedFallback,
+                local_http_ui = CreateLocalHttpUiPayload(),
                 tui = new
                 {
                     library = "Spectre.Console",
@@ -525,6 +536,30 @@ namespace Sarifintown.AgentEngine
             return string.IsNullOrWhiteSpace(sessionClientName)
                 ? string.Empty
                 : sessionClientName.Trim();
+        }
+
+        private static object CreateLocalHttpUiPayload()
+        {
+            string baseUrl;
+            lock (SyncRoot)
+            {
+                baseUrl = _localUiBaseUrl;
+            }
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                return new
+                {
+                    available = false,
+                    uri = (string?)null
+                };
+            }
+
+            return new
+            {
+                available = true,
+                uri = $"{baseUrl.TrimEnd('/')}/mcp/dashboard"
+            };
         }
 
         private static object? GetPropertyValue(object? instance, string propertyName)

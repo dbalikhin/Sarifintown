@@ -1,9 +1,11 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+﻿using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Sarifintown.AgentEngine;
 using Sarifintown.Core;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateSlimBuilder(args);
+builder.Logging.ClearProviders();
+builder.WebHost.UseUrls("http://127.0.0.1:0");
 
 var discovery = WorkspaceSarifDiscovery.Discover();
 
@@ -18,6 +20,10 @@ builder.Services.AddMcpServer()
 
 var app = builder.Build();
 
+app.UseBlazorFrameworkFiles();
+app.UseStaticFiles();
+app.MapFallbackToFile("index.html");
+
 // Ensure TreeSitter is initialized before accepting AI requests
 var treeSitter = app.Services.GetRequiredService<ITreeSitterEngine>();
 await treeSitter.InitializeAsync();
@@ -26,5 +32,21 @@ await treeSitter.InitializeAsync();
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
 SarifTools.TreeSitterEngine = treeSitter;
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
+SarifTools.SetLocalUiBaseUrl(string.Empty);
 
-await app.RunAsync();
+await app.StartAsync();
+
+var localUiBaseUrl = app.Urls.FirstOrDefault(url =>
+    url.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase));
+
+if (string.IsNullOrWhiteSpace(localUiBaseUrl))
+{
+    var server = app.Services.GetRequiredService<IServer>();
+    var addressesFeature = server.Features.Get<IServerAddressesFeature>();
+    localUiBaseUrl = addressesFeature?.Addresses.FirstOrDefault(url =>
+        url.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase));
+}
+
+SarifTools.SetLocalUiBaseUrl(localUiBaseUrl ?? string.Empty);
+
+await app.WaitForShutdownAsync();
