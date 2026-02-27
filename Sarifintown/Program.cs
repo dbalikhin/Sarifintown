@@ -51,7 +51,10 @@ namespace Sarifintown
             builder.Services.AddSingleton<SarifFileService>();
             builder.Services.AddSingleton<LocalFilesService>();
             builder.Services.AddSingleton<SettingsService>();
+            builder.Services.AddScoped<AppModeService>();
             builder.Services.AddScoped<CodeSnippetService>();
+            builder.Services.AddScoped<McpUiBridgeService>();
+            builder.Services.AddScoped<McpAgentToolClientService>();
 
             var host = builder.Build();
 

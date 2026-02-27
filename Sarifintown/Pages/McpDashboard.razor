@@ -1,0 +1,84 @@
+@page "/mcp/dashboard"
+@using Sarifintown.Services
+@implements IDisposable
+
+@inject McpUiBridgeService Bridge
+@inject SarifFileService SarifFileService
+@inject NavigationManager Navigation
+
+<PageTitle>MCP Dashboard</PageTitle>
+
+<MudStack Spacing="2">
+    <MudText Typo="Typo.h5">MCP IDE Surface</MudText>
+    <MudText Typo="Typo.body2">Status: @_connectionState</MudText>
+    <MudText Typo="Typo.body2">Last host event: @_lastHostEvent</MudText>
+    <MudText Typo="Typo.body2">Loaded SARIF files: @SarifFileService.Count</MudText>
+
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SendStateAsync">
+        Send UI state to host
+    </MudButton>
+
+    <MudButton Variant="Variant.Outlined" Color="Color.Info" OnClick="NavigateToFiles">
+        Open workspace SARIF view
+    </MudButton>
+</MudStack>
+
+@code {
+    private string _connectionState = "Connecting...";
+    private string _lastHostEvent = "None";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Bridge.HostMessageReceived += OnHostMessageReceivedAsync;
+        await Bridge.InitializeAsync();
+
+        await Bridge.SendAsync("ui.ready", new
+        {
+            route = "/mcp/dashboard",
+            capabilities = new[] { "state", "navigation", "diagnostics", "toolRequests" }
+        });
+
+        _connectionState = "Connected";
+    }
+
+    private async Task OnHostMessageReceivedAsync(McpEnvelope envelope)
+    {
+        _lastHostEvent = envelope.Type;
+
+        if (string.Equals(envelope.Type, "host.ping", StringComparison.OrdinalIgnoreCase))
+        {
+            await Bridge.SendAsync("ui.pong", new { utc = DateTime.UtcNow }, envelope.RequestId);
+        }
+
+        if (string.Equals(envelope.Type, "host.getState", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendStateAsync(envelope.RequestId);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task SendStateAsync()
+    {
+        return SendStateAsync(requestId: null);
+    }
+
+    private async Task SendStateAsync(string? requestId)
+    {
+        await Bridge.SendAsync("ui.state", new
+        {
+            filesLoaded = SarifFileService.Count,
+            timestampUtc = DateTime.UtcNow
+        }, requestId);
+    }
+
+    private void NavigateToFiles()
+    {
+        Navigation.NavigateTo("/mcp/files");
+    }
+
+    public void Dispose()
+    {
+        Bridge.HostMessageReceived -= OnHostMessageReceivedAsync;
+    }
+}

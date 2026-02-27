@@ -125,7 +125,12 @@ namespace Sarifintown.AgentEngine
                     host,
                     mode,
                     host_family = hostFamily,
-                    uri = "ui://sarifintown/dashboard",
+                    uri = "ui://sarifintown/mcp/dashboard",
+                    bridge = new
+                    {
+                        transport = "postMessage",
+                        channel = "sarifintown.mcp.v1"
+                    },
                     fallback = new
                     {
                         mode = "cli-tui",

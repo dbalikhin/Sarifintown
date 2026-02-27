@@ -248,6 +248,32 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj
 
 ---
 
+## IDE UI surface contract (MCP `ui://`)
+
+`ResolveInteractiveSurface` returns:
+
+- `uri`: `ui://sarifintown/mcp/dashboard`
+- `bridge.transport`: `postMessage`
+- `bridge.channel`: `sarifintown.mcp.v1`
+
+Recommended message envelope for host ↔ UI:
+
+```json
+{
+  "channel": "sarifintown.mcp.v1",
+  "type": "host.ping",
+  "requestId": "optional-correlation-id",
+  "payload": {}
+}
+```
+
+Common events:
+
+- Host -> UI: `host.ping`, `host.getState`
+- UI -> Host: `ui.ready`, `ui.pong`, `ui.state`
+
+---
+
 ## Troubleshooting
 
 ## No SARIF files returned

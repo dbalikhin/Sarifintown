@@ -291,7 +291,9 @@ namespace Sarifintown.AgentEngine.Tests
             var payload = JsonSerializer.Deserialize<JsonElement>(result);
 
             // Assert
-            Assert.That(payload.GetProperty("uri").GetString(), Is.EqualTo("ui://sarifintown/dashboard"));
+            Assert.That(payload.GetProperty("uri").GetString(), Is.EqualTo("ui://sarifintown/mcp/dashboard"));
+            Assert.That(payload.GetProperty("bridge").GetProperty("transport").GetString(), Is.EqualTo("postMessage"));
+            Assert.That(payload.GetProperty("bridge").GetProperty("channel").GetString(), Is.EqualTo("sarifintown.mcp.v1"));
         }
 
         [Test]

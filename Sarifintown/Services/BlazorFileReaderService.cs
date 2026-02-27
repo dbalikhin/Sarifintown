@@ -17,6 +17,8 @@ namespace Sarifintown.Services
 
         public async Task<string> ReadFileAsync(string relativePath)
         {
+            await _jsRuntime.InvokeVoidAsync("scriptLoader.ensure", "/js/fileReader.js");
+
             foreach (var directory in _localFilesService.AllDirectories)
             {
                 try
