@@ -103,6 +103,62 @@ If you cannot use the global tool in your IDE, use `dotnet run --project ...` as
 
 ---
 
+## Terminal MCP configuration (CLI clients)
+
+If you use MCP from terminal-first clients (for example Claude Code, Codex CLI, Aider, or custom MCP CLI runners), use stdio transport and pass workspace via environment variables.
+
+Minimum terminal launch pattern:
+
+### Windows PowerShell
+
+```powershell
+$env:PROJECT_ROOT = "C:/path/to/your/workspace"
+$env:MCP_CLIENT_NAME = "Claude Code"
+sarifintown
+```
+
+### macOS/Linux
+
+```bash
+export PROJECT_ROOT="/path/to/your/workspace"
+export MCP_CLIENT_NAME="Claude Code"
+sarifintown
+```
+
+Notes:
+
+- `PROJECT_ROOT` is strongly recommended so `.sarif` discovery is deterministic.
+- `MCP_CLIENT_NAME` is optional but recommended; it improves host detection/routing.
+- If your client sets `MCP_HOST` or `MCP_CLIENT`, those are also recognized.
+
+### Example terminal client config (`mcp.json` style)
+
+```json
+{
+  "mcpServers": {
+    "sarifintown": {
+      "transport": "stdio",
+      "command": "sarifintown",
+      "args": [],
+      "env": {
+        "PROJECT_ROOT": "/absolute/path/to/workspace",
+        "MCP_CLIENT_NAME": "Claude Code"
+      }
+    }
+  }
+}
+```
+
+### Fallback command for terminal clients
+
+If `sarifintown` is not installed as a global tool:
+
+```bash
+dotnet run --project Sarifintown.AgentEngine/Sarifintown.AgentEngine.csproj
+```
+
+---
+
 ## Detailed sample for a typical `mcp.json`
 
 ### Windows (preferred global tool)
@@ -116,8 +172,7 @@ If you cannot use the global tool in your IDE, use `dotnet run --project ...` as
       "args": [],
       "cwd": "C:/dev/sarifintown",
       "env": {
-        "PROJECT_ROOT": "C:/dev/my-app",
-        "DOTNET_ENVIRONMENT": "Production"
+        "PROJECT_ROOT": "C:/dev/my-app"
       }
     }
   }
@@ -135,8 +190,7 @@ If you cannot use the global tool in your IDE, use `dotnet run --project ...` as
       "args": [],
       "cwd": "/Users/me/dev/sarifintown",
       "env": {
-        "PROJECT_ROOT": "/Users/me/dev/my-app",
-        "DOTNET_ENVIRONMENT": "Production"
+        "PROJECT_ROOT": "/Users/me/dev/my-app"
       }
     }
   }
@@ -158,8 +212,7 @@ If you cannot use the global tool in your IDE, use `dotnet run --project ...` as
       ],
       "cwd": "C:/dev/sarifintown",
       "env": {
-        "PROJECT_ROOT": "C:/dev/my-app",
-        "DOTNET_ENVIRONMENT": "Production"
+        "PROJECT_ROOT": "C:/dev/my-app"
       }
     }
   }
@@ -172,6 +225,7 @@ If you cannot use the global tool in your IDE, use `dotnet run --project ...` as
 - `command` + `args`: starts the MCP server process.
 - `cwd`: optional but useful for predictable relative paths.
 - `env.PROJECT_ROOT`: **required** for correct SARIF discovery from `.sarif/`.
+- `DOTNET_ENVIRONMENT`: optional; this project does not require it for MCP behavior.
 
 ### Path guidance
 
