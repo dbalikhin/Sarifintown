@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Sarifintown.AgentEngine\Sarifintown.AgentEngine.csproj" />
+    <ProjectReference Include="..\Sarifintown.AgentEngine\Sarifintown.Engine.csproj" />
   </ItemGroup>
 
 <ItemGroup>

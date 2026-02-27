@@ -1,11 +1,11 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
 VisualStudioVersion = 18.3.11512.155
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sarifintown", "Sarifintown\Sarifintown.csproj", "{69ECCA96-E434-49D3-989E-CD6B7773715C}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Sarifintown.UI", "Sarifintown\\Sarifintown.UI.csproj", "{69ECCA96-E434-49D3-989E-CD6B7773715C}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Tests", "Sarifintown.Tests\Sarifintown.Tests.csproj", "{75CECCCA-4789-4555-975B-5E772FD99208}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.UI.Tests", "Sarifintown.Tests\\Sarifintown.UI.Tests.csproj", "{75CECCCA-4789-4555-975B-5E772FD99208}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"
 	ProjectSection(SolutionItems) = preProject
@@ -26,11 +26,11 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "workflows", "workflows", "{
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Core", "Sarifintown.Core\Sarifintown.Core.csproj", "{B2B08E1B-2B6F-4B1C-A3E1-87FB057F2A1F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.AgentEngine", "Sarifintown.AgentEngine\Sarifintown.AgentEngine.csproj", "{92D84CDA-6203-9FCF-A448-4BEAB5E92476}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Engine", "Sarifintown.AgentEngine\\Sarifintown.Engine.csproj", "{92D84CDA-6203-9FCF-A448-4BEAB5E92476}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Core.Tests", "Sarifintown.Core.Tests\Sarifintown.Core.Tests.csproj", "{5539053E-9CDC-4385-8D1B-67F67C5AD5EC}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.AgentEngine.Tests", "Sarifintown.AgentEngine.Tests\Sarifintown.AgentEngine.Tests.csproj", "{4765B0F9-9B5F-46D0-BCCD-F1AB026C4B77}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sarifintown.Engine.Tests", "Sarifintown.AgentEngine.Tests\\Sarifintown.Engine.Tests.csproj", "{4765B0F9-9B5F-46D0-BCCD-F1AB026C4B77}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
