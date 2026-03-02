@@ -4,12 +4,64 @@ namespace Sarifintown.Helpers
 {
     public class SnippetHelper
     {
-        public static ExtractedCodeSnippet ExtractCodeSnippet(string fileContent, Region region)
+        private const int DefaultContextRadius = 3;
+
+        public static ExtractedCodeSnippet ExtractCodeSnippet(string fileContent, Region region, int surroundingLines = DefaultContextRadius)
         {
-            return ExtractCodeSnippet(fileContent, region.StartLine, region.StartColumn, region.EndLine, region.EndColumn);
+            return ExtractCodeSnippet(fileContent, region.StartLine, region.StartColumn, region.EndLine, region.EndColumn, surroundingLines);
         }
 
-        public static ExtractedCodeSnippet ExtractCodeSnippet(string fileContent, int startLine, int startColumn, int endLine, int endColumn)
+        public static string ExtractLineWindow(string fileContent, int startLine, int endLine, int radius = DefaultContextRadius)
+        {
+            if (string.IsNullOrEmpty(fileContent))
+            {
+                return string.Empty;
+            }
+
+            var allLines = fileContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            if (allLines.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var normalizedStart = Math.Max(1, startLine);
+            var normalizedEnd = Math.Max(normalizedStart, endLine);
+
+            var visibleStartLine = Math.Max(1, normalizedStart - Math.Max(0, radius));
+            var visibleEndLine = Math.Min(allLines.Length, normalizedEnd + Math.Max(0, radius));
+
+            return string.Join(Environment.NewLine, allLines.Skip(visibleStartLine - 1).Take((visibleEndLine - visibleStartLine) + 1)).TrimEnd();
+        }
+
+        public static string ExtractLineRange(string fileContent, int startLine, int endLine)
+        {
+            if (string.IsNullOrEmpty(fileContent))
+            {
+                return string.Empty;
+            }
+
+            var allLines = fileContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            if (allLines.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var normalizedStart = Math.Max(1, startLine);
+            var normalizedEnd = Math.Max(normalizedStart, endLine);
+
+            var safeStart = Math.Min(normalizedStart, allLines.Length);
+            var safeEnd = Math.Min(normalizedEnd, allLines.Length);
+
+            return string.Join(Environment.NewLine, allLines.Skip(safeStart - 1).Take((safeEnd - safeStart) + 1)).TrimEnd();
+        }
+
+        public static ExtractedCodeSnippet ExtractCodeSnippet(
+            string fileContent,
+            int startLine,
+            int startColumn,
+            int endLine,
+            int endColumn,
+            int surroundingLines = DefaultContextRadius)
         {
             // Split the file content into lines
             var allLines = fileContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
@@ -24,8 +76,9 @@ namespace Sarifintown.Helpers
             }
 
             // Calculate the visible range of lines to include (with boundary checks)
-            int visibleStartLine = Math.Max(1, startLine - 3);
-            int visibleEndLine = Math.Min(totalLines, endLine + 3);
+            var contextRadius = Math.Max(1, surroundingLines);
+            int visibleStartLine = Math.Max(1, startLine - contextRadius);
+            int visibleEndLine = Math.Min(totalLines, endLine + contextRadius);
 
             // Extract ContextSnippet: the lines from visibleStartLine to visibleEndLine
             var contextLines = new List<string>();

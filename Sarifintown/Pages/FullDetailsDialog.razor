@@ -223,7 +223,10 @@
         {
             foreach (var codeFlowItem in _codeFlowDataList)
             {
-                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(_usedFiles[codeFlowItem.Filename], codeFlowItem.Region);
+                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(
+                    _usedFiles[codeFlowItem.Filename],
+                    codeFlowItem.Region,
+                    SettingsService.SurroundingLines);
             }
         }
         else if (SettingsService.ResultViewMode == ResultViewMode.SingleWindow)
@@ -231,7 +234,10 @@
 
             foreach (var codeFlowItem in _codeFlowDataList)
             {                
-                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(_usedFiles[codeFlowItem.Filename], codeFlowItem.Region);
+                codeFlowItem.ExtractedSnippet = SnippetHelper.ExtractCodeSnippet(
+                    _usedFiles[codeFlowItem.Filename],
+                    codeFlowItem.Region,
+                    SettingsService.SurroundingLines);
 
             }
 

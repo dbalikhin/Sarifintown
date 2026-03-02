@@ -17,6 +17,7 @@ namespace Sarifintown.AgentEngine
         private static readonly object SyncRoot = new();
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
+        private static string _workspaceRoot = Directory.GetCurrentDirectory();
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -97,6 +98,19 @@ namespace Sarifintown.AgentEngine
             }
         }
 
+        public static void SetWorkspaceRoot(string workspaceRoot)
+        {
+            if (string.IsNullOrWhiteSpace(workspaceRoot))
+            {
+                throw new ArgumentException("Workspace root is required.", nameof(workspaceRoot));
+            }
+
+            lock (SyncRoot)
+            {
+                _workspaceRoot = Path.GetFullPath(workspaceRoot);
+            }
+        }
+
         [McpServerTool]
         [Description("Returns all SARIF files discovered in the current workspace .sarif folder at server startup.")]
         public static string ListWorkspaceSarifFiles()
@@ -114,6 +128,95 @@ namespace Sarifintown.AgentEngine
             });
 
             return JsonSerializer.Serialize(payload);
+        }
+
+        [McpServerTool]
+        [Description("Provides a 10,000-foot security posture summary from loaded SARIF findings and local .sarif/triage.json state.")]
+        public static async Task<string> TriageStatus()
+        {
+            var workflow = CreateTriageWorkflowService();
+            var status = await workflow.GetStatusAsync();
+            return JsonSerializer.Serialize(status);
+        }
+
+        [McpServerTool]
+        [Description("Returns prioritized findings with optional filters: severity, rule, file, state, and limit.")]
+        public static async Task<string> TriageList(
+            string severity = "",
+            string rule = "",
+            string file = "",
+            string state = "",
+            int limit = 10)
+        {
+            var workflow = CreateTriageWorkflowService();
+            var findings = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit));
+            return JsonSerializer.Serialize(findings);
+        }
+
+        [McpServerTool]
+        [Description("Alias of TriageList for query-oriented clients.")]
+        public static Task<string> TriageQuery(
+            string severity = "",
+            string rule = "",
+            string file = "",
+            string state = "",
+            int limit = 10)
+        {
+            return TriageList(severity, rule, file, state, limit);
+        }
+
+        [McpServerTool]
+        [Description("Returns dense technical evidence for a single finding including ordered data flow steps and method snippets.")]
+        public static async Task<string> TriageInspect(string findingId, string evidenceMode = "")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var inspect = await workflow.InspectAsync(findingId, evidenceMode);
+
+            if (inspect == null)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    success = false,
+                    message = $"Finding not found: {findingId}"
+                });
+            }
+
+            return JsonSerializer.Serialize(inspect);
+        }
+
+        [McpServerTool]
+        [Description("Records a TP/FP triage decision for one finding in .sarif/triage.json.")]
+        public static async Task<string> Triage(
+            string findingId,
+            string state,
+            string reason,
+            string author = "AI")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var result = await workflow.TriageAsync(findingId, state, reason, author);
+            return JsonSerializer.Serialize(result);
+        }
+
+        [McpServerTool]
+        [Description("Applies TP/FP triage to multiple findings using list filters. At least one of severity/rule/file is required.")]
+        public static async Task<string> TriageBulk(
+            string state,
+            string reason,
+            string severity = "",
+            string rule = "",
+            string file = "",
+            bool dryRun = false,
+            string author = "AI")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var result = await workflow.TriageBulkAsync(
+                state,
+                reason,
+                new TriageQueryOptions(severity, rule, file, string.Empty, int.MaxValue),
+                dryRun,
+                author);
+
+            return JsonSerializer.Serialize(result);
         }
 
         [McpServerTool]
@@ -151,9 +254,17 @@ namespace Sarifintown.AgentEngine
             }
 
             string selectedAction = string.Empty;
+            string commandResult = string.Empty;
             if (startCliMenu)
             {
                 selectedAction = SpectreCliMenu.Start();
+                if (selectedAction.StartsWith("Triage ", StringComparison.Ordinal))
+                {
+                    commandResult = SpectreCliMenu
+                        .ExecuteTriageActionAsync(CreateTriageWorkflowService(), selectedAction)
+                        .GetAwaiter()
+                        .GetResult();
+                }
             }
 
             return JsonSerializer.Serialize(new
@@ -167,6 +278,7 @@ namespace Sarifintown.AgentEngine
                 {
                     library = "Spectre.Console",
                     action = selectedAction,
+                    action_result = commandResult,
                     menu = "interactive"
                 }
             });
@@ -272,32 +384,55 @@ namespace Sarifintown.AgentEngine
                         if (string.IsNullOrEmpty(relativePath)) continue;
 
                         var resolvedPath = FileHelper.ResolveArtifactPath(physLoc.ArtifactLocation, targetRun);
-                        var fullPath = Path.IsPathRooted(resolvedPath)
-                            ? resolvedPath
-                            : Path.Combine(sourceCodeRoot, (resolvedPath ?? relativePath).Replace("file://", "").TrimStart('/'));
+                        var candidatePath = string.IsNullOrWhiteSpace(resolvedPath) ? relativePath : resolvedPath;
+                        var fullPath = Path.IsPathRooted(candidatePath)
+                            ? candidatePath
+                            : Path.Combine(sourceCodeRoot, candidatePath.Replace("file://", "").TrimStart('/'));
+
+                        if (!File.Exists(fullPath))
+                        {
+                            var fallbackByFileName = Path.Combine(sourceCodeRoot, Path.GetFileName(candidatePath));
+                            if (File.Exists(fallbackByFileName))
+                            {
+                                fullPath = fallbackByFileName;
+                            }
+                        }
 
                         string snippetCode = "Source file unavailable";
 
-                        if (File.Exists(fullPath))
+                        string? sourceCode = null;
+                        try
                         {
-                            var sourceCode = await FileReader.ReadFileAsync(fullPath);
-
-                            // Leverage TreeSitter for accurate code parsing
+                            sourceCode = await FileReader.ReadFileAsync(fullPath);
+                        }
+                        catch (IOException)
+                        {
+                            sourceCode = null;
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            sourceCode = null;
+                        }
+                        if (!string.IsNullOrWhiteSpace(sourceCode))
+                        {
                             var language = GetLanguageFromExtension(Path.GetExtension(fullPath));
 
-                            int startLine = (physLoc.Region?.StartLine ?? 1) - 1;
-                            int endLine = (physLoc.Region?.EndLine ?? startLine + 1) - 1;
+                            var windowStartLine = physLoc.Region?.StartLine ?? 1;
+                            var windowEndLine = physLoc.Region?.EndLine > 0
+                                ? physLoc.Region.EndLine
+                                : windowStartLine;
 
-                            snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
-
-                            if (string.IsNullOrEmpty(snippetCode))
+                            if (!string.IsNullOrWhiteSpace(language))
                             {
-                                // Basic snippet extraction (expandable with TreeSitter nodes)
-                                var lines = sourceCode.Split('\n');
-                                startLine = Math.Max(0, startLine);
-                                endLine = Math.Min(lines.Length - 1, endLine);
+                                var startLine = Math.Max(0, windowStartLine - 1);
+                                var endLine = Math.Max(startLine, windowEndLine - 1);
+                                snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
+                            }
 
-                                snippetCode = string.Join("\n", lines.Skip(startLine).Take(endLine - startLine + 1));
+                            if (string.IsNullOrWhiteSpace(snippetCode)
+                                || snippetCode.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                snippetCode = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
                             }
                         }
 
@@ -348,7 +483,7 @@ namespace Sarifintown.AgentEngine
                 ".sh" => "bash",
                 ".ps1" => "powershell",
                 ".sql" => "sql",
-                _ => "csharp" // default
+            _ => string.Empty
             };
         }
 
@@ -379,6 +514,25 @@ namespace Sarifintown.AgentEngine
             }
 
             return sarifPath;
+        }
+
+        private static TriageWorkflowService CreateTriageWorkflowService()
+        {
+            if (FileReader == null || TreeSitterEngine == null)
+            {
+                throw new InvalidOperationException("Core engines are not initialized.");
+            }
+
+            List<string> discoveredFiles;
+            string workspaceRoot;
+
+            lock (SyncRoot)
+            {
+                discoveredFiles = _discoveredSarifFiles.ToList();
+                workspaceRoot = _workspaceRoot;
+            }
+
+            return new TriageWorkflowService(FileReader, TreeSitterEngine, workspaceRoot, discoveredFiles);
         }
 
         private static string DetectHost(McpServer thisServer, string hostHint)

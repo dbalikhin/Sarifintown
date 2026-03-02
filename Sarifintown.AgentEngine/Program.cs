@@ -12,6 +12,7 @@ var discovery = WorkspaceSarifDiscovery.Discover();
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
+builder.Services.AddSingleton<IPromptAssemblyService, PromptAssemblyService>();
 
 // Register MCP Server (if using the prerelease SDK)
 builder.Services.AddMcpServer()
@@ -33,6 +34,7 @@ SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
 SarifTools.TreeSitterEngine = treeSitter;
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
+SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
 
 await app.StartAsync();
 
