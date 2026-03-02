@@ -13,13 +13,18 @@ namespace Sarifintown.Services
     {
         private readonly Sarifintown.Core.IFileReader _fileReader;
         private readonly LocalFilesService _localFilesService;
+        private readonly SettingsService _settingsService;
         private readonly Dictionary<string, string> _fileContentCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ExtractedCodeSnippet> _snippetCache = new(StringComparer.Ordinal);
 
-        public CodeSnippetService(Sarifintown.Core.IFileReader fileReader, LocalFilesService localFilesService)
+        public CodeSnippetService(
+            Sarifintown.Core.IFileReader fileReader,
+            LocalFilesService localFilesService,
+            SettingsService settingsService)
         {
             _fileReader = fileReader;
             _localFilesService = localFilesService;
+            _settingsService = settingsService;
         }
 
         /// <summary>
@@ -166,7 +171,13 @@ namespace Sarifintown.Services
                 _fileContentCache[adjustedPath] = content;
             }
 
-            var snippet = SnippetHelper.ExtractCodeSnippet(content, region.StartLine, region.StartColumn, region.EndLine, region.EndColumn);
+            var snippet = SnippetHelper.ExtractCodeSnippet(
+                content,
+                region.StartLine,
+                region.StartColumn,
+                region.EndLine,
+                region.EndColumn,
+                _settingsService.SurroundingLines);
             location.PhysicalLocation.ExtractedCodeSnippet = snippet;
             result.IsSnippetLoaded = snippet != null;
 

@@ -15,8 +15,9 @@ namespace Sarifintown.Tests
 
             var localFilesService = new LocalFilesService();
             localFilesService.AddDirectory(new DirectoryPicker { Id = 1, Name = "src" });
+            var settingsService = new SettingsService();
 
-            var service = new CodeSnippetService(fileReader, localFilesService);
+            var service = new CodeSnippetService(fileReader, localFilesService, settingsService);
             var run = new Run { Results = new List<Result>() };
             var result = CreateResult();
             run.Results.Add(result);
@@ -40,8 +41,9 @@ namespace Sarifintown.Tests
 
             var localFilesService = new LocalFilesService();
             localFilesService.AddDirectory(new DirectoryPicker { Id = 2, Name = "src" });
+            var settingsService = new SettingsService();
 
-            var service = new CodeSnippetService(fileReader, localFilesService);
+            var service = new CodeSnippetService(fileReader, localFilesService, settingsService);
             var run = new Run
             {
                 Results =
@@ -60,6 +62,29 @@ namespace Sarifintown.Tests
             Assert.That(response.Success, Is.True);
             Assert.That(run.Results.All(result => result.IsSnippetLoaded), Is.True);
             Assert.That(callbackCount, Is.GreaterThanOrEqualTo(2));
+        }
+
+        [Test]
+        public async Task EnsureCodeSnippetAsync_WhenSurroundingLinesChanged_UsesConfiguredWindow()
+        {
+            var fileReader = new CountingFileReader();
+            fileReader.Files["src/file.cs"] = "line1\nline2\nline3\nline4\nline5\nline6";
+
+            var localFilesService = new LocalFilesService();
+            localFilesService.AddDirectory(new DirectoryPicker { Id = 3, Name = "src" });
+
+            var settingsService = new SettingsService { SurroundingLines = 1 };
+            var service = new CodeSnippetService(fileReader, localFilesService, settingsService);
+
+            var run = new Run { Results = new List<Result>() };
+            var result = CreateResult("src/file.cs");
+            run.Results.Add(result);
+
+            var response = await service.EnsureCodeSnippetAsync(run, result);
+
+            Assert.That(response.Success, Is.True);
+            Assert.That(result.Locations[0].PhysicalLocation.ExtractedCodeSnippet!.VisibleStartLine, Is.EqualTo(1));
+            Assert.That(result.Locations[0].PhysicalLocation.ExtractedCodeSnippet!.VisibleEndLine, Is.EqualTo(3));
         }
 
         private static Result CreateResult(string path = "src/file.cs")

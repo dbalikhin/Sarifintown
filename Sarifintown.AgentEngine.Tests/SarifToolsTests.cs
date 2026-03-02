@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using Sarifintown.AgentEngine;
 using Sarifintown.Core;
+using System.Linq;
 using System.Text.Json;
 
 namespace Sarifintown.AgentEngine.Tests
@@ -10,7 +11,7 @@ namespace Sarifintown.AgentEngine.Tests
     {
         private class FakeFileReader : IFileReader
         {
-            public Dictionary<string, string> Files { get; } = new();
+            public Dictionary<string, string> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
 
             public Task<string> ReadFileAsync(string relativePath)
             {
@@ -18,12 +19,152 @@ namespace Sarifintown.AgentEngine.Tests
                 {
                     return Task.FromResult(content);
                 }
+
                 // Fallback to actual file read if not in dictionary
                 if (File.Exists(relativePath))
                 {
                     return File.ReadAllTextAsync(relativePath);
                 }
                 throw new FileNotFoundException($"File not found: {relativePath}");
+            }
+        }
+
+        [Test]
+        public async Task TriageInspect_WithLineWindowConcatenated_MergesNearbySteps()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            var sourceDirectory = Path.Combine(workspace, "src");
+            Directory.CreateDirectory(sarifDirectory);
+            Directory.CreateDirectory(sourceDirectory);
+
+            var sourcePath = Path.Combine(sourceDirectory, "Flow.cs");
+            File.WriteAllText(sourcePath, string.Join("\n", Enumerable.Range(1, 40).Select(index => $"line {index}")));
+
+            var sarifPath = Path.Combine(sarifDirectory, "inspect.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-FLOW",
+                      "message": { "text": "flow" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Flow.cs" },
+                            "region": { "startLine": 10 }
+                          }
+                        }
+                      ],
+                      "codeFlows": [
+                        {
+                          "threadFlows": [
+                            {
+                              "locations": [
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Flow.cs" }, "region": { "startLine": 10 } } } },
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Flow.cs" }, "region": { "startLine": 14 } } } },
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Flow.cs" }, "region": { "startLine": 30 } } } }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 1);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
+
+                var inspectJson = await SarifTools.TriageInspect(findingId!, "line-window-concatenated");
+                var inspectPayload = JsonSerializer.Deserialize<JsonElement>(inspectJson);
+
+                Assert.That(inspectPayload.GetProperty("DataFlowEvidenceMode").GetString(), Is.EqualTo("line-window-concatenated"));
+                Assert.That(inspectPayload.GetProperty("DataFlowEvidenceBlocks").GetArrayLength(), Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task TriageInspect_WithLineWindowStrict_UsesPerStepBlocks()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            var sourceDirectory = Path.Combine(workspace, "src");
+            Directory.CreateDirectory(sarifDirectory);
+            Directory.CreateDirectory(sourceDirectory);
+
+            var sourcePath = Path.Combine(sourceDirectory, "Strict.cs");
+            File.WriteAllText(sourcePath, string.Join("\n", Enumerable.Range(1, 20).Select(index => $"line {index}")));
+
+            var sarifPath = Path.Combine(sarifDirectory, "strict-inspect.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-STRICT",
+                      "message": { "text": "flow" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Strict.cs" },
+                            "region": { "startLine": 4 }
+                          }
+                        }
+                      ],
+                      "codeFlows": [
+                        {
+                          "threadFlows": [
+                            {
+                              "locations": [
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Strict.cs" }, "region": { "startLine": 4 } } } },
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Strict.cs" }, "region": { "startLine": 9 } } } }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 1);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
+
+                var inspectJson = await SarifTools.TriageInspect(findingId!, "line-window-strict");
+                var inspectPayload = JsonSerializer.Deserialize<JsonElement>(inspectJson);
+
+                Assert.That(inspectPayload.GetProperty("DataFlowEvidenceMode").GetString(), Is.EqualTo("line-window-strict"));
+                Assert.That(inspectPayload.GetProperty("DataFlowEvidenceBlocks").GetArrayLength(), Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
             }
         }
 

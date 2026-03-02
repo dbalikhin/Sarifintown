@@ -22,7 +22,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task ExtractMethodAsync_WithValidCSharpCode_ReturnsAstString()
+        public async Task ExtractMethodAsync_WithValidCSharpCode_ReturnsMethodBody()
         {
             // Arrange
             var sourceCode = @"
@@ -33,19 +33,19 @@ namespace Sarifintown.AgentEngine.Tests
                     int x = 1;
                 }
             }";
-            var language = "c_sharp"; // Note: the wasm file is tree-sitter-c_sharp.wasm
+            var language = "csharp";
 
             // Act
-            var result = await _engine.ExtractMethodAsync(sourceCode, language, 0, 0);
+            var result = await _engine.ExtractMethodAsync(sourceCode, language, 2, 4);
 
             // Assert
             Assert.That(result, Is.Not.Null);
-            Assert.That(result, Contains.Substring("class_declaration"));
-            Assert.That(result, Contains.Substring("method_declaration"));
+            Assert.That(result, Contains.Substring("public void TestMethod()"));
+            Assert.That(result, Contains.Substring("int x = 1;"));
         }
 
         [Test]
-        public async Task ExtractMethodAsync_WithValidJavascriptCode_ReturnsAstString()
+        public async Task ExtractMethodAsync_WithValidJavascriptCode_ReturnsFunctionBody()
         {
             // Arrange
             var sourceCode = @"
@@ -55,11 +55,21 @@ namespace Sarifintown.AgentEngine.Tests
             var language = "javascript";
 
             // Act
-            var result = await _engine.ExtractMethodAsync(sourceCode, language, 0, 0);
+            var result = await _engine.ExtractMethodAsync(sourceCode, language, 1, 1);
 
             // Assert
             Assert.That(result, Is.Not.Null);
-            Assert.That(result, Contains.Substring("function_declaration"));
+            Assert.That(result, Contains.Substring("function testMethod()"));
+        }
+
+        [Test]
+        public async Task ExtractMethodAsync_WithUnknownLanguage_ReturnsEmptyForFallback()
+        {
+            var sourceCode = "line1\nline2";
+
+            var result = await _engine.ExtractMethodAsync(sourceCode, "unknownlang", 0, 0);
+
+            Assert.That(result, Is.EqualTo(string.Empty));
         }
     }
 }

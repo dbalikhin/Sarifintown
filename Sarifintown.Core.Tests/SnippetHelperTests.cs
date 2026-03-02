@@ -80,4 +80,20 @@ public class SnippetHelperTests
 
         Assert.That(result, Does.Contain("<mark>line2\nline3\nline</mark>4"));
     }
+
+    [Test]
+    public void ExtractLineWindow_WithRadius_ReturnsBoundedContext()
+    {
+        var result = SnippetHelper.ExtractLineWindow(SampleCode, 5, 5, 2);
+
+        Assert.That(result, Is.EqualTo(string.Join(Environment.NewLine, "line3", "line4", "line5", "line6", "line7")));
+    }
+
+    [Test]
+    public void ExtractLineRange_WithRange_ReturnsInclusiveLines()
+    {
+        var result = SnippetHelper.ExtractLineRange(SampleCode, 2, 4);
+
+        Assert.That(result, Is.EqualTo(string.Join(Environment.NewLine, "line2", "line3", "line4")));
+    }
 }

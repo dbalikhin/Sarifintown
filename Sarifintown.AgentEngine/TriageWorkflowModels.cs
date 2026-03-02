@@ -7,6 +7,13 @@ internal enum TriageFindingState
     FP = 2
 }
 
+internal enum TriageEvidenceMode
+{
+    TreeSitterMethod = 0,
+    LineWindowStrict = 1,
+    LineWindowConcatenated = 2
+}
+
 internal sealed record TriageQueryOptions(
     string Severity = "",
     string Rule = "",
@@ -39,6 +46,16 @@ internal sealed record TriageInspectStep(
     string Message,
     string CodeSnippet);
 
+internal sealed record TriageEvidenceBlock(
+    int StartStepIndex,
+    int EndStepIndex,
+    string FilePath,
+    int? StartLine,
+    int? EndLine,
+    string Mode,
+    IReadOnlyList<int> StepIndexes,
+    string CodeSnippet);
+
 internal sealed record TriageInspectResult(
     string FindingId,
     string RuleId,
@@ -48,7 +65,9 @@ internal sealed record TriageInspectResult(
     string Message,
     string RuleDescription,
     string Remediation,
-    IReadOnlyList<TriageInspectStep> DataFlowSteps);
+    IReadOnlyList<TriageInspectStep> DataFlowSteps,
+    string DataFlowEvidenceMode,
+    IReadOnlyList<TriageEvidenceBlock> DataFlowEvidenceBlocks);
 
 internal sealed record TriageOperationResult(
     bool Success,

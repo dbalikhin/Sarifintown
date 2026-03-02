@@ -19,16 +19,19 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
     private const string DefaultCategoryFileName = "default-sast.md";
 
     private readonly string _promptRootDirectory;
+    private readonly PromptTemplateStyle _templateStyle;
 
     public PromptAssemblyService(string? rootDirectoryPath = null)
     {
         _promptRootDirectory = ResolveRootDirectory(rootDirectoryPath);
+        _templateStyle = PromptTemplateStyle.Structured;
     }
 
     public PromptAssemblyService(IOptions<PromptAssemblyOptions> options)
     {
         ArgumentNullException.ThrowIfNull(options);
         _promptRootDirectory = ResolveRootDirectory(options.Value.RootDirectoryPath);
+        _templateStyle = options.Value.TemplateStyle;
     }
 
     /// <summary>
@@ -52,7 +55,7 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         {
             await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false),
             await ReadModuleOrMissingCommentAsync(categoryModulePath, cancellationToken).ConfigureAwait(false),
-            BuildFindingContextSection(resolvedRuleId, resolvedMessage)
+            BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle)
         };
 
         var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
@@ -99,28 +102,107 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         return builder.ToString().TrimEnd();
     }
 
-    private static string BuildFindingContextSection(string ruleId, string message)
+    private static string BuildFindingContextSection(string ruleId, string message, PromptTemplateStyle templateStyle)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("### Finding Context");
-        builder.AppendLine($"- rule-id: `{(string.IsNullOrWhiteSpace(ruleId) ? "unknown" : ruleId)}`");
-        builder.AppendLine("- source: `sarif-finding`");
-        builder.AppendLine();
-        builder.AppendLine("#### Finding Message");
-        builder.AppendLine(string.IsNullOrWhiteSpace(message) ? "- n/a" : message);
-        builder.AppendLine();
-        builder.AppendLine("#### Evidence Template");
-        builder.AppendLine("- file: `<relative-file-path>`");
-        builder.AppendLine("- location: `<start-line[:start-column]-end-line[:end-column]>`");
-        builder.AppendLine("- language: `<programming-language>`");
-        builder.AppendLine("- data-flow: `source -> propagation -> sink` (markdown bullet list)");
-        builder.AppendLine();
-        builder.AppendLine("```text");
-        builder.AppendLine("<code-snippet-from-sarif-or-source>");
-        builder.AppendLine("```");
+        var resolvedRule = string.IsNullOrWhiteSpace(ruleId) ? "unknown" : ruleId;
+        var resolvedMessage = string.IsNullOrWhiteSpace(message) ? "- n/a" : message;
 
-        return builder.ToString().TrimEnd();
+        var template = templateStyle switch
+        {
+            PromptTemplateStyle.Compact => CompactFindingContextTemplate,
+            PromptTemplateStyle.Verbose => VerboseFindingContextTemplate,
+            _ => StructuredFindingContextTemplate
+        };
+
+        return template
+            .Replace("{{RULE_ID}}", resolvedRule, StringComparison.Ordinal)
+            .Replace("{{MESSAGE}}", resolvedMessage, StringComparison.Ordinal)
+            .TrimEnd();
     }
+
+    private const string StructuredFindingContextTemplate = """
+### Finding Context
+- rule-id: `{{RULE_ID}}`
+- source: `sarif-finding`
+
+#### Finding Message
+{{MESSAGE}}
+
+#### Vulnerability Report Template
+Keep `[Metadata]` and `[Description]` consistent across all extraction strategies. Change only `[Data Flow Evidence]` rendering.
+
+```markdown
+# Vulnerability Report
+
+### [Metadata]
+* **Rule ID:** `<rule-id>`
+* **Category:** `<security-category>`
+* **Primary File:** `<relative-file-path>`
+* **Sink Node:** `<sink-api-or-call>`
+
+### [Description]
+<clear summary of why untrusted input reaches a dangerous sink>
+
+### [Data Flow Evidence]
+**[Step 1: Source]** `<file-path:line>`
+```csharp
+<source snippet>
+```
+**[Step 2: Propagator]** `<file-path:line>`
+```csharp
+<propagation snippet(s)>
+```
+**[Step N: Sink]** `<file-path:line>`
+```csharp
+<sink snippet>
+```
+```
+
+#### Data Flow Rendering Rules
+- Option 2.1 (`line ±3 strict separation`): output one step header plus one code block per step.
+- Option 2.2 (`line ±3 concatenated blocks`): group by `file_path`, sort by `line_number`, and if adjacent steps differ by <= 6 lines emit sequential step headers followed by one shared code block.
+- Option 2.3 (`tree-sitter method extraction`): if steps resolve to the same method node, emit sequential step headers followed by one shared full-method code block.
+- Use `Source`, `Propagator`, and `Sink` labels in each step header.
+""";
+
+    private const string CompactFindingContextTemplate = """
+### Finding Context
+- rule-id: `{{RULE_ID}}`
+- source: `sarif-finding`
+
+#### Finding Message
+{{MESSAGE}}
+
+#### Vulnerability Report Template (Compact)
+Use sections in this order: `[Metadata]`, `[Description]`, `[Data Flow Evidence]`.
+
+#### Data Flow Rendering Rules
+- Option 2.1: one code block per step (`line ±3`).
+- Option 2.2: same file + line distance <= 6 => one shared code block.
+- Option 2.3: same tree-sitter method => one shared full-method code block.
+""";
+
+    private const string VerboseFindingContextTemplate = """
+### Finding Context
+- rule-id: `{{RULE_ID}}`
+- source: `sarif-finding`
+
+#### Finding Message
+{{MESSAGE}}
+
+#### Vulnerability Report Template (Verbose)
+Always render `# Vulnerability Report`.
+Always keep `### [Metadata]` and `### [Description]` unchanged across extraction modes.
+Only alter `### [Data Flow Evidence]` according to the selected extraction strategy.
+
+#### Data Flow Rendering Rules
+1. Group steps by `file_path`.
+2. Sort steps by `line_number`.
+3. Option 2.1 (`line ±3 strict separation`): emit one step header + one code block for each step.
+4. Option 2.2 (`line ±3 concatenated blocks`): if `Step[N+1].Line_Number - Step[N].Line_Number <= 6`, emit sequential step headers then one code block.
+5. Option 2.3 (`tree-sitter method extraction`): if steps are inside the same method AST node, emit sequential step headers then one shared method block.
+6. Use labels `Source`, `Propagator`, `Sink` for each step header.
+""";
 
     private static string DetermineCategoryModule(string ruleId, string message)
     {

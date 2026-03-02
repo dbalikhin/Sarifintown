@@ -96,12 +96,17 @@ internal sealed class TriageWorkflowService
         return ordered;
     }
 
-    public async Task<TriageInspectResult?> InspectAsync(string findingId, CancellationToken cancellationToken = default)
+    public async Task<TriageInspectResult?> InspectAsync(
+        string findingId,
+        string evidenceMode = "",
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(findingId))
         {
             throw new ArgumentException("Finding identifier is required.", nameof(findingId));
         }
+
+        var resolvedEvidenceMode = ParseEvidenceMode(evidenceMode);
 
         var findings = await LoadFindingsAsync(cancellationToken);
         var finding = findings.FirstOrDefault(item => string.Equals(item.FindingId, findingId, StringComparison.Ordinal));
@@ -128,7 +133,7 @@ internal sealed class TriageWorkflowService
             }
 
             var resolvedPath = ResolveFindingPath(finding, physicalLocation.ArtifactLocation);
-            var snippet = await ExtractSnippetAsync(resolvedPath, physicalLocation.Region, cancellationToken);
+            var snippet = await ExtractSnippetAsync(resolvedPath, physicalLocation.Region, resolvedEvidenceMode, cancellationToken);
 
             steps.Add(new TriageInspectStep(
                 index + 1,
@@ -137,6 +142,8 @@ internal sealed class TriageWorkflowService
                 flowLocation.Location?.Message?.Text ?? string.Empty,
                 snippet));
         }
+
+        var evidenceBlocks = await BuildEvidenceBlocksAsync(finding, steps, resolvedEvidenceMode, cancellationToken);
 
         return new TriageInspectResult(
             finding.FindingId,
@@ -147,7 +154,193 @@ internal sealed class TriageWorkflowService
             finding.Result.Message?.Text ?? string.Empty,
             finding.RuleDescription,
             finding.Remediation,
-            steps);
+            steps,
+            ToEvidenceModeValue(resolvedEvidenceMode),
+            evidenceBlocks);
+    }
+
+    public Task<TriageInspectResult?> InspectAsync(string findingId, CancellationToken cancellationToken = default)
+    {
+        return InspectAsync(findingId, string.Empty, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TriageEvidenceBlock>> BuildEvidenceBlocksAsync(
+        TriageFindingEnvelope finding,
+        IReadOnlyList<TriageInspectStep> steps,
+        TriageEvidenceMode mode,
+        CancellationToken cancellationToken)
+    {
+        if (steps.Count == 0)
+        {
+            return Array.Empty<TriageEvidenceBlock>();
+        }
+
+        if (mode == TriageEvidenceMode.LineWindowStrict)
+        {
+            return steps
+                .Select(step => new TriageEvidenceBlock(
+                    step.Index,
+                    step.Index,
+                    step.FilePath,
+                    step.StartLine,
+                    step.StartLine,
+                    ToEvidenceModeValue(mode),
+                    new[] { step.Index },
+                    step.CodeSnippet))
+                .ToList();
+        }
+
+        var groupedBlocks = new List<TriageEvidenceBlock>();
+
+        for (var index = 0; index < steps.Count;)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var blockSteps = new List<TriageInspectStep> { steps[index] };
+            var nextIndex = index + 1;
+
+            while (nextIndex < steps.Count && ShouldMergeSteps(steps[nextIndex - 1], steps[nextIndex], mode))
+            {
+                blockSteps.Add(steps[nextIndex]);
+                nextIndex++;
+            }
+
+            var first = blockSteps[0];
+            var last = blockSteps[^1];
+            var snippet = await ResolveBlockSnippetAsync(finding, blockSteps, mode, cancellationToken);
+
+            groupedBlocks.Add(new TriageEvidenceBlock(
+                first.Index,
+                last.Index,
+                first.FilePath,
+                first.StartLine,
+                last.StartLine,
+                ToEvidenceModeValue(mode),
+                blockSteps.Select(step => step.Index).ToArray(),
+                snippet));
+
+            index = nextIndex;
+        }
+
+        return groupedBlocks;
+    }
+
+    private async Task<string> ResolveBlockSnippetAsync(
+        TriageFindingEnvelope finding,
+        IReadOnlyList<TriageInspectStep> blockSteps,
+        TriageEvidenceMode mode,
+        CancellationToken cancellationToken)
+    {
+        if (blockSteps.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (mode == TriageEvidenceMode.TreeSitterMethod)
+        {
+            return blockSteps[0].CodeSnippet;
+        }
+
+        var firstPath = blockSteps[0].FilePath;
+        if (string.IsNullOrWhiteSpace(firstPath))
+        {
+            return blockSteps[0].CodeSnippet;
+        }
+
+        var resolvedPath = ResolveFindingPath(
+            finding,
+            new PhysicalLocation.PhysicalLocationArtifactLocation { Uri = firstPath });
+
+        if (string.IsNullOrWhiteSpace(resolvedPath) || !File.Exists(resolvedPath))
+        {
+            return blockSteps[0].CodeSnippet;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var sourceCode = await _fileReader.ReadFileAsync(resolvedPath);
+        if (string.IsNullOrWhiteSpace(sourceCode))
+        {
+            return blockSteps[0].CodeSnippet;
+        }
+
+        var minLine = blockSteps
+            .Where(step => step.StartLine.HasValue)
+            .Select(step => step.StartLine!.Value)
+            .DefaultIfEmpty(1)
+            .Min();
+
+        var maxLine = blockSteps
+            .Where(step => step.StartLine.HasValue)
+            .Select(step => step.StartLine!.Value)
+            .DefaultIfEmpty(minLine)
+            .Max();
+
+        return SnippetHelper.ExtractLineWindow(sourceCode, minLine, maxLine);
+    }
+
+    private static bool ShouldMergeSteps(TriageInspectStep previous, TriageInspectStep current, TriageEvidenceMode mode)
+    {
+        if (!string.Equals(previous.FilePath, current.FilePath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return mode switch
+        {
+            TriageEvidenceMode.LineWindowConcatenated => CanMergeByLineDistance(previous.StartLine, current.StartLine),
+            TriageEvidenceMode.TreeSitterMethod => CanMergeByMethodSnippet(previous.CodeSnippet, current.CodeSnippet),
+            _ => false
+        };
+    }
+
+    private static bool CanMergeByLineDistance(int? previousLine, int? currentLine)
+    {
+        if (!previousLine.HasValue || !currentLine.HasValue)
+        {
+            return false;
+        }
+
+        return currentLine.Value - previousLine.Value <= 6;
+    }
+
+    private static bool CanMergeByMethodSnippet(string previousSnippet, string currentSnippet)
+    {
+        if (string.IsNullOrWhiteSpace(previousSnippet)
+            || string.IsNullOrWhiteSpace(currentSnippet)
+            || previousSnippet.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase)
+            || currentSnippet.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return string.Equals(previousSnippet, currentSnippet, StringComparison.Ordinal);
+    }
+
+    private static TriageEvidenceMode ParseEvidenceMode(string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return TriageEvidenceMode.TreeSitterMethod;
+        }
+
+        var normalized = mode.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "line-window-strict" or "strict" or "option2.1" => TriageEvidenceMode.LineWindowStrict,
+            "line-window-concatenated" or "concatenated" or "option2.2" => TriageEvidenceMode.LineWindowConcatenated,
+            "tree-sitter-method" or "tree-sitter" or "option2.3" => TriageEvidenceMode.TreeSitterMethod,
+            _ => TriageEvidenceMode.TreeSitterMethod
+        };
+    }
+
+    private static string ToEvidenceModeValue(TriageEvidenceMode mode)
+    {
+        return mode switch
+        {
+            TriageEvidenceMode.LineWindowStrict => "line-window-strict",
+            TriageEvidenceMode.LineWindowConcatenated => "line-window-concatenated",
+            _ => "tree-sitter-method"
+        };
     }
 
     public async Task<TriageOperationResult> TriageAsync(
@@ -830,7 +1023,11 @@ internal sealed class TriageWorkflowService
         return Path.Combine(_workspaceRoot, resolved.Replace('/', Path.DirectorySeparatorChar));
     }
 
-    private async Task<string> ExtractSnippetAsync(string sourcePath, Region? region, CancellationToken cancellationToken)
+    private async Task<string> ExtractSnippetAsync(
+        string sourcePath,
+        Region? region,
+        TriageEvidenceMode evidenceMode,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
         {
@@ -843,9 +1040,23 @@ internal sealed class TriageWorkflowService
             return string.Empty;
         }
 
-        var startLine = Math.Max(0, (region?.StartLine ?? 1) - 1);
-        var endLine = Math.Max(startLine, (region?.EndLine ?? startLine + 1) - 1);
+        if (evidenceMode is TriageEvidenceMode.LineWindowStrict or TriageEvidenceMode.LineWindowConcatenated)
+        {
+            var windowStart = region?.StartLine ?? 1;
+            var windowEnd = region?.EndLine > 0 ? region.EndLine : windowStart;
+            return SnippetHelper.ExtractLineWindow(sourceCode, windowStart, windowEnd);
+        }
+
+        var windowStartLine = region?.StartLine ?? 1;
+        var windowEndLine = region?.EndLine > 0 ? region.EndLine : windowStartLine;
+        var startLine = Math.Max(0, windowStartLine - 1);
+        var endLine = Math.Max(startLine, windowEndLine - 1);
         var language = GetLanguageFromExtension(Path.GetExtension(sourcePath));
+
+        if (string.IsNullOrWhiteSpace(language))
+        {
+            return SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -855,15 +1066,7 @@ internal sealed class TriageWorkflowService
             return extractedMethod.Trim();
         }
 
-        var lines = sourceCode.Split('\n');
-        if (lines.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        var safeStart = Math.Min(startLine, lines.Length - 1);
-        var safeEnd = Math.Min(endLine, lines.Length - 1);
-        return string.Join("\n", lines.Skip(safeStart).Take((safeEnd - safeStart) + 1)).Trim();
+        return SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
     }
 
     private static string GetLanguageFromExtension(string extension)
@@ -891,7 +1094,7 @@ internal sealed class TriageWorkflowService
             ".sh" => "bash",
             ".ps1" => "powershell",
             ".sql" => "sql",
-            _ => "csharp"
+            _ => string.Empty
         };
     }
 

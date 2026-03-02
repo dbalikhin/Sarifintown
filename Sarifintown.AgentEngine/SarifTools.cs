@@ -167,10 +167,10 @@ namespace Sarifintown.AgentEngine
 
         [McpServerTool]
         [Description("Returns dense technical evidence for a single finding including ordered data flow steps and method snippets.")]
-        public static async Task<string> TriageInspect(string findingId)
+        public static async Task<string> TriageInspect(string findingId, string evidenceMode = "")
         {
             var workflow = CreateTriageWorkflowService();
-            var inspect = await workflow.InspectAsync(findingId);
+            var inspect = await workflow.InspectAsync(findingId, evidenceMode);
 
             if (inspect == null)
             {
@@ -384,32 +384,55 @@ namespace Sarifintown.AgentEngine
                         if (string.IsNullOrEmpty(relativePath)) continue;
 
                         var resolvedPath = FileHelper.ResolveArtifactPath(physLoc.ArtifactLocation, targetRun);
-                        var fullPath = Path.IsPathRooted(resolvedPath)
-                            ? resolvedPath
-                            : Path.Combine(sourceCodeRoot, (resolvedPath ?? relativePath).Replace("file://", "").TrimStart('/'));
+                        var candidatePath = string.IsNullOrWhiteSpace(resolvedPath) ? relativePath : resolvedPath;
+                        var fullPath = Path.IsPathRooted(candidatePath)
+                            ? candidatePath
+                            : Path.Combine(sourceCodeRoot, candidatePath.Replace("file://", "").TrimStart('/'));
+
+                        if (!File.Exists(fullPath))
+                        {
+                            var fallbackByFileName = Path.Combine(sourceCodeRoot, Path.GetFileName(candidatePath));
+                            if (File.Exists(fallbackByFileName))
+                            {
+                                fullPath = fallbackByFileName;
+                            }
+                        }
 
                         string snippetCode = "Source file unavailable";
 
-                        if (File.Exists(fullPath))
+                        string? sourceCode = null;
+                        try
                         {
-                            var sourceCode = await FileReader.ReadFileAsync(fullPath);
-
-                            // Leverage TreeSitter for accurate code parsing
+                            sourceCode = await FileReader.ReadFileAsync(fullPath);
+                        }
+                        catch (IOException)
+                        {
+                            sourceCode = null;
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            sourceCode = null;
+                        }
+                        if (!string.IsNullOrWhiteSpace(sourceCode))
+                        {
                             var language = GetLanguageFromExtension(Path.GetExtension(fullPath));
 
-                            int startLine = (physLoc.Region?.StartLine ?? 1) - 1;
-                            int endLine = (physLoc.Region?.EndLine ?? startLine + 1) - 1;
+                            var windowStartLine = physLoc.Region?.StartLine ?? 1;
+                            var windowEndLine = physLoc.Region?.EndLine > 0
+                                ? physLoc.Region.EndLine
+                                : windowStartLine;
 
-                            snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
-
-                            if (string.IsNullOrEmpty(snippetCode))
+                            if (!string.IsNullOrWhiteSpace(language))
                             {
-                                // Basic snippet extraction (expandable with TreeSitter nodes)
-                                var lines = sourceCode.Split('\n');
-                                startLine = Math.Max(0, startLine);
-                                endLine = Math.Min(lines.Length - 1, endLine);
+                                var startLine = Math.Max(0, windowStartLine - 1);
+                                var endLine = Math.Max(startLine, windowEndLine - 1);
+                                snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
+                            }
 
-                                snippetCode = string.Join("\n", lines.Skip(startLine).Take(endLine - startLine + 1));
+                            if (string.IsNullOrWhiteSpace(snippetCode)
+                                || snippetCode.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                snippetCode = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
                             }
                         }
 
@@ -460,7 +483,7 @@ namespace Sarifintown.AgentEngine
                 ".sh" => "bash",
                 ".ps1" => "powershell",
                 ".sql" => "sql",
-                _ => "csharp" // default
+            _ => string.Empty
             };
         }
 
