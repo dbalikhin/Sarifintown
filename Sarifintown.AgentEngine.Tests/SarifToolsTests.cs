@@ -99,7 +99,7 @@ namespace Sarifintown.AgentEngine.Tests
             {
                 var findingsJson = await SarifTools.TriageList(limit: 5);
                 var findings = JsonSerializer.Deserialize<List<JsonElement>>(findingsJson);
-                var findingId = findings![0].GetProperty("findingId").GetString();
+                var findingId = findings![0].GetProperty("FindingId").GetString();
 
                 var triagePath = Path.Combine(sarifDirectory, "triage.json");
                 File.WriteAllText(triagePath, JsonSerializer.Serialize(new
@@ -121,9 +121,9 @@ namespace Sarifintown.AgentEngine.Tests
                 var responseJson = await SarifTools.TriageStatus();
                 var payload = JsonSerializer.Deserialize<JsonElement>(responseJson);
 
-                Assert.That(payload.GetProperty("totalFindings").GetInt32(), Is.EqualTo(2));
-                Assert.That(payload.GetProperty("triagedCount").GetInt32(), Is.EqualTo(1));
-                Assert.That(payload.GetProperty("openCount").GetInt32(), Is.EqualTo(1));
+                Assert.That(payload.GetProperty("TotalFindings").GetInt32(), Is.EqualTo(2));
+                Assert.That(payload.GetProperty("TriagedCount").GetInt32(), Is.EqualTo(1));
+                Assert.That(payload.GetProperty("OpenCount").GetInt32(), Is.EqualTo(1));
             }
             finally
             {
@@ -198,7 +198,7 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(payload, Is.Not.Null);
                 Assert.That(payload!.Count, Is.EqualTo(1));
-                Assert.That(payload[0].GetProperty("ruleName").GetString(), Is.EqualTo("SQLInjection"));
+                Assert.That(payload[0].GetProperty("RuleName").GetString(), Is.EqualTo("SQLInjection"));
             }
             finally
             {
@@ -258,19 +258,19 @@ namespace Sarifintown.AgentEngine.Tests
             {
                 var listJson = await SarifTools.TriageList(limit: 1);
                 var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
-                var findingId = listPayload![0].GetProperty("findingId").GetString();
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
 
                 var triageJson = await SarifTools.Triage(findingId!, "TP", "validated", "User");
                 var triagePayload = JsonSerializer.Deserialize<JsonElement>(triageJson);
-                Assert.That(triagePayload.GetProperty("success").GetBoolean(), Is.True);
+                Assert.That(triagePayload.GetProperty("Success").GetBoolean(), Is.True);
 
                 var triageFileJson = File.ReadAllText(Path.Combine(sarifDirectory, "triage.json"));
                 Assert.That(triageFileJson, Does.Contain("validated"));
 
                 var dryRunJson = await SarifTools.TriageBulk("FP", "noise", severity: "Medium", dryRun: true);
                 var dryRunPayload = JsonSerializer.Deserialize<JsonElement>(dryRunJson);
-                Assert.That(dryRunPayload.GetProperty("dryRun").GetBoolean(), Is.True);
-                Assert.That(dryRunPayload.GetProperty("affectedCount").GetInt32(), Is.EqualTo(1));
+                Assert.That(dryRunPayload.GetProperty("DryRun").GetBoolean(), Is.True);
+                Assert.That(dryRunPayload.GetProperty("AffectedCount").GetInt32(), Is.EqualTo(1));
             }
             finally
             {
