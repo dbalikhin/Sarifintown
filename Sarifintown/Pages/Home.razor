@@ -6,6 +6,7 @@
 @inject IJSRuntime JS
 @inject ISnackbar Snackbar
 @inject LocalFilesService LocalFilesService
+@inject SarifTriageSidecarService SarifTriageSidecarService
 
 <PageTitle>Sarif In Town Start</PageTitle>
 
@@ -116,6 +117,15 @@
                         Name = result.Name,
                         Subdirectories = result.Subdirectories,
                     });
+
+                try
+                {
+                    await SarifTriageSidecarService.PrimeDirectoryAsync(result.DirectoryId);
+                }
+                catch (JSException ex)
+                {
+                    Snackbar.Add($"Could not load suppression sidecar: {ex.Message}", Severity.Warning);
+                }
 
                 Snackbar.Add($"View access granted for: {result.Name}", Severity.Success);
 
@@ -231,6 +241,11 @@
         var logAdded = SarifFileService.AddSarifFile(new SarifFile(filename, size, sarifLog), jsDirectoryId);
         if (logAdded)
         {
+            if (jsDirectoryId > 0)
+            {
+                SarifTriageSidecarService.ApplySuppressions(sarifLog, jsDirectoryId);
+            }
+
             importLog += "Success: File added to the current analysis" + Environment.NewLine;
             return true;
         }

@@ -270,6 +270,7 @@ Recommended message envelope for host ↔ UI:
 Common events:
 
 - Host -> UI: `host.ping`, `host.getState`
+- Host -> UI: `host.openFinding` (payload: `resultIdentity`)
 - UI -> Host: `ui.ready`, `ui.pong`, `ui.state`, `ui.request.chatPrompt`
 
 `ui.request.chatPrompt` payload:

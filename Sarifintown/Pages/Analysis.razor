@@ -10,6 +10,7 @@
 @inject IDialogService DialogService
 @inject LocalFilesService LocalFilesService
 @inject CodeSnippetService CodeSnippetService
+@inject NavigationManager Navigation
 
 <PageTitle>Analysis</PageTitle>
 
@@ -40,7 +41,7 @@ else
                             {                  
                                 <MudToolBar Class="justify-space-between" Dense >
                                     <MudButtonGroup Color="Color.Primary" Variant="Variant.Outlined">
-                                        <MudButton Size="Size.Small" Variant="Variant.Filled" StartIcon="@Icons.Material.Outlined.Transform" Color="Color.Primary" OnClick="@(() => AddCodeSnippetsAsync(run))">
+                                        <MudButton Size="Size.Small" Variant="Variant.Filled" StartIcon="@Icons.Material.Outlined.Transform" Color="Color.Primary" OnClick="@(() => AddCodeSnippetsAsync(run))" Disabled="@_isLoadingSnippets">
                                             Add Code Snippets
                                         </MudButton>
                                     </MudButtonGroup>
@@ -74,7 +75,7 @@ else
                                              Hideable="true"
                                              Groupable="true"
                                              GroupExpanded="true"                                             
-                                             QuickFilter="FilterBySeverityAndRule"                                             
+                                             QuickFilter="@((result) => FilterBySeverityAndRule(run, result))"                                             
                                              Dense>
                                     <Columns>                                        
                                         <PropertyColumn Property="x => x.FilenamePath" Title="File Path"
@@ -108,6 +109,10 @@ else
                                                             <MudText Class="d-flex align-center ml-14" GutterBottom>                                                                
                                                                 <b>(Line: @context.Item.Locations[0].PhysicalLocation.Region.StartLine) @context.Item.Locations[0].PhysicalLocation.Region.Snippet?.Text</b>
                                                             </MudText>
+
+                                                            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Info" OnClick="@(() => LoadSnippetAsync(run, context.Item))" Disabled="@_isLoadingSnippets">
+                                                                Load Snippet
+                                                            </MudButton>
                                                         }
                                                         @if (context.Item.Locations[0].PhysicalLocation.ExtractedCodeSnippet != null)
                                                         {
@@ -150,15 +155,34 @@ else
 }
 
 @code {
+    [SupplyParameterFromQuery(Name = "findingId")]
+    public string? FindingId { get; set; }
+
     private bool IsGrouped { get; set; } = false;
     private MudDataGrid<Result> dataGrid;
+    private readonly Dictionary<Run, (int Version, HashSet<string> Identities)> _runFilterCache = new();
+    private int _filterVersion;
+    private bool _isLoadingSnippets;
+    private bool _findingHandled;
 
     private IReadOnlyCollection<string>? _selectedSeverity;
     private IEnumerable<RuleWithCount>? _selectedRules;
 
-    private bool FilterBySeverityAndRule(Result result)
+    private bool FilterBySeverityAndRule(Run run, Result result)
     {
-        return AnalysisHelper.FilterBySeverityAndRule(result, _selectedSeverity, _selectedRules);
+        if (result == null || string.IsNullOrWhiteSpace(result.ResultIdentity))
+        {
+            return false;
+        }
+
+        if (!_runFilterCache.TryGetValue(run, out var cache) || cache.Version != _filterVersion)
+        {
+            var ids = SarifFileService.GetFilteredResultIdentities(run, _selectedSeverity, _selectedRules);
+            cache = (_filterVersion, ids);
+            _runFilterCache[run] = cache;
+        }
+
+        return cache.Identities.Contains(result.ResultIdentity);
     }
 
     private Color GetAvatarColor(string level)
@@ -186,11 +210,13 @@ else
     private void RulesSelectedValuesChanged(IEnumerable<RuleWithCount> rules)
     {
         _selectedRules = rules;
+        InvalidateFilterCache();
     }
 
     private void SeveritySelectionChanged(IReadOnlyCollection<string> selectedValues)
     {
         _selectedSeverity = selectedValues;
+        InvalidateFilterCache();
     }
 
     private IEnumerable<SarifFile> selectedFiles { get; set; } = new List<SarifFile>();
@@ -212,10 +238,22 @@ else
         selectedFiles = SarifFileService.AllFiles;
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_findingHandled || string.IsNullOrWhiteSpace(FindingId))
+        {
+            return;
+        }
+
+        _findingHandled = true;
+        await OpenFindingFromQueryAsync(FindingId);
+    }
+
     private void OnTabActivated()
     {
         // reset selected rules
         _selectedRules = null;
+        InvalidateFilterCache();
     }
 
     private Task OpenDetailsAsync(Result result, int  jsDirectoryId)
@@ -232,13 +270,65 @@ else
 
     private async Task AddCodeSnippetsAsync(Run run)
     {
-        var (success, errorMessage) = await CodeSnippetService.AddCodeSnippetsToRunAsync(run, () => InvokeAsync(StateHasChanged));
+        _isLoadingSnippets = true;
 
-        if (!success)
+        try
         {
-            Snackbar.Add(errorMessage, Severity.Error);
+            var (success, errorMessage) = await CodeSnippetService.AddCodeSnippetsToRunAsync(
+                run,
+                onSnippetAdded: () => InvokeAsync(StateHasChanged),
+                batchSize: 25);
+
+            if (!success)
+            {
+                Snackbar.Add(errorMessage, Severity.Error);
+            }
+        }
+        finally
+        {
+            _isLoadingSnippets = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
+    private async Task LoadSnippetAsync(Run run, Result result)
+    {
+        var (success, errorMessage) = await CodeSnippetService.EnsureCodeSnippetAsync(run, result);
+        if (!success)
+        {
+            Snackbar.Add(errorMessage, Severity.Warning);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenFindingFromQueryAsync(string resultIdentity)
+    {
+        var match = SarifFileService.FindResultByIdentity(resultIdentity);
+        if (match == null)
+        {
+            Snackbar.Add("Requested finding is not available in the current analysis session.", Severity.Warning);
+            return;
+        }
+
+        var run = match.Value.Run;
+        var result = match.Value.Result;
+
+        selectedFiles = SarifFileService.AllFiles.Where(file => (file.SarifLog.Runs ?? new List<Run>()).Contains(run)).ToList();
+
+        var (snippetLoaded, errorMessage) = await CodeSnippetService.EnsureCodeSnippetAsync(run, result);
+        if (!snippetLoaded && !string.IsNullOrWhiteSpace(errorMessage))
+        {
+            Snackbar.Add(errorMessage, Severity.Warning);
+        }
+
+        await OpenDetailsAsync(result, run.JSDirectoryId);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void InvalidateFilterCache()
+    {
+        _filterVersion++;
+    }
 
 }

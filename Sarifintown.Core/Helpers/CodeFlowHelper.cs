@@ -31,7 +31,14 @@ namespace Sarifintown.Helpers
                         if (region == null) 
                             continue;
 
-                        var normalizedPathForPhysicalLocation = FileHelper.NormalizePath(location.PhysicalLocation.ArtifactLocation.Uri);
+                        var normalizedPathForPhysicalLocation = result.ParentRun != null
+                            ? FileHelper.ResolveArtifactPath(location.PhysicalLocation.ArtifactLocation, result.ParentRun)
+                            : string.Empty;
+
+                        if (string.IsNullOrWhiteSpace(normalizedPathForPhysicalLocation))
+                        {
+                            normalizedPathForPhysicalLocation = FileHelper.NormalizePath(location.PhysicalLocation.ArtifactLocation.Uri);
+                        }
 
                         string error;
                         var (adjustedPath, matchedFolder) = FileHelper.AdjustPathToGrantedFolder(normalizedPathForPhysicalLocation, allDirectories, out error);

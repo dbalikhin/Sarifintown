@@ -43,6 +43,7 @@ namespace Sarifintown
             builder.Services.AddSingleton<SettingsService>();
             builder.Services.AddScoped<AppModeService>();
             builder.Services.AddScoped<CodeSnippetService>();
+            builder.Services.AddScoped<SarifTriageSidecarService>();
             builder.Services.AddScoped<McpUiBridgeService>();
             builder.Services.AddScoped<McpAgentToolClientService>();
 

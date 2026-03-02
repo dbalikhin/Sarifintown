@@ -1,5 +1,6 @@
 @page "/mcp/dashboard"
 @using Sarifintown.Services
+@using System.Text.Json
 @implements IDisposable
 
 @inject McpUiBridgeService Bridge
@@ -39,7 +40,7 @@
         await Bridge.SendAsync("ui.ready", new
         {
             route = "/mcp/dashboard",
-            capabilities = new[] { "state", "navigation", "diagnostics", "toolRequests" }
+            capabilities = new[] { "state", "navigation", "diagnostics", "toolRequests", "openFinding" }
         });
 
         _connectionState = "Connected";
@@ -57,6 +58,17 @@
         if (string.Equals(envelope.Type, "host.getState", StringComparison.OrdinalIgnoreCase))
         {
             await SendStateAsync(envelope.RequestId);
+        }
+
+        if (string.Equals(envelope.Type, "host.openFinding", StringComparison.OrdinalIgnoreCase)
+            && envelope.Payload.ValueKind == JsonValueKind.Object
+            && envelope.Payload.TryGetProperty("resultIdentity", out var resultIdentityElement))
+        {
+            var resultIdentity = resultIdentityElement.GetString();
+            if (!string.IsNullOrWhiteSpace(resultIdentity))
+            {
+                Navigation.NavigateTo($"/analysis?findingId={Uri.EscapeDataString(resultIdentity)}");
+            }
         }
 
         await InvokeAsync(StateHasChanged);

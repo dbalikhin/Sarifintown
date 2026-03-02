@@ -1,5 +1,6 @@
 ﻿#nullable disable
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Sarifintown.Models
@@ -24,6 +25,12 @@ namespace Sarifintown.Models
         [JsonPropertyName("results")]
         public List<Result> Results { get; set; }
 
+        [JsonPropertyName("originalUriBaseIds")]
+        public Dictionary<string, UriBaseId> OriginalUriBaseIds { get; set; }
+
+        [JsonPropertyName("artifacts")]
+        public List<Artifact> Artifacts { get; set; }
+
         [JsonIgnore]
         public ResultLevels Levels { get; set; } = new ResultLevels();
 
@@ -40,6 +47,30 @@ namespace Sarifintown.Models
 
         [JsonIgnore]
         public List<RuleWithCount> UsedRules { get; set; }
+
+        [JsonIgnore]
+        public Dictionary<string, HashSet<string>> ResultIdentityBySeverity { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public Dictionary<string, HashSet<string>> ResultIdentityByRuleId { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public HashSet<string> AllResultIdentities { get; set; } = new(StringComparer.Ordinal);
+    }
+
+    public class UriBaseId
+    {
+        [JsonPropertyName("uri")]
+        public string Uri { get; set; }
+
+        [JsonPropertyName("uriBaseId")]
+        public string ParentUriBaseId { get; set; }
+    }
+
+    public class Artifact
+    {
+        [JsonPropertyName("location")]
+        public PhysicalLocation.PhysicalLocationArtifactLocation Location { get; set; }
     }
 
     public class RuleWithCount
@@ -97,7 +128,8 @@ namespace Sarifintown.Models
             public string Level { get; set; }
         }
 
-        public List<RuleProperty> Properties { get; set; }
+        [JsonPropertyName("properties")]
+        public Dictionary<string, JsonElement> Properties { get; set; }
     }
 
     public class RuleProperty
@@ -153,10 +185,22 @@ namespace Sarifintown.Models
         public string FilenamePath { get; set; }
 
         [JsonIgnore]
+        public string OriginalFilenamePath { get; set; }
+
+        [JsonIgnore]
         public string FilenameExt { get; set; }
 
         [JsonIgnore]
         public Rule Rule { get; set; }
+
+        [JsonIgnore]
+        public string ResultIdentity { get; set; }
+
+        [JsonIgnore]
+        public bool IsSnippetLoaded { get; set; }
+
+        [JsonIgnore]
+        public Run ParentRun { get; set; }
 
         [JsonPropertyName("locations")]
         public List<ResultLocation> Locations { get; set; }
@@ -169,6 +213,21 @@ namespace Sarifintown.Models
 
         [JsonPropertyName("properties")]
         public Dictionary<string, object> Properties { get; set; }
+
+        [JsonPropertyName("fingerprints")]
+        public Dictionary<string, string> Fingerprints { get; set; }
+
+        [JsonPropertyName("partialFingerprints")]
+        public Dictionary<string, string> PartialFingerprints { get; set; }
+
+        [JsonPropertyName("guid")]
+        public string Guid { get; set; }
+
+        [JsonPropertyName("kind")]
+        public string Kind { get; set; }
+
+        [JsonPropertyName("baselineState")]
+        public string BaselineState { get; set; }
 
         [JsonPropertyName("suppressions")]
         public List<Suppression> Suppressions { get; set; }
@@ -250,6 +309,9 @@ namespace Sarifintown.Models
 
             [JsonPropertyName("uriBaseId")]
             public string UriBaseId { get; set; }
+
+            [JsonPropertyName("index")]
+            public int? Index { get; set; }
         }
 
         [JsonPropertyName("region")]
