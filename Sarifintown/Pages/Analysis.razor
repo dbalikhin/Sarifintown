@@ -3,7 +3,6 @@
 @using Sarifintown.Models
 @using Sarifintown.Services
 @using System.Linq
-@implements IDisposable
 
 @inject SarifFileService SarifFileService
 @inject IJSRuntime JS
@@ -45,12 +44,6 @@ else
                                         <MudButton Size="Size.Small" Variant="Variant.Filled" StartIcon="@Icons.Material.Outlined.Transform" Color="Color.Primary" OnClick="@(() => AddCodeSnippetsAsync(run))" Disabled="@_isLoadingSnippets">
                                             Add Code Snippets
                                         </MudButton>
-                                        @if (_isLoadingSnippets)
-                                        {
-                                            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Warning" OnClick="CancelSnippetLoading">
-                                                Cancel Loading
-                                            </MudButton>
-                                        }
                                     </MudButtonGroup>
 
                                     <MudChipSet T="string" SelectionMode="SelectionMode.MultiSelection" CheckMark="true" Variant="Variant.Text" Color="Color.Info" SelectedValuesChanged="SeveritySelectionChanged">
@@ -170,7 +163,6 @@ else
     private readonly Dictionary<Run, (int Version, HashSet<string> Identities)> _runFilterCache = new();
     private int _filterVersion;
     private bool _isLoadingSnippets;
-    private CancellationTokenSource? _snippetLoadingCts;
     private bool _findingHandled;
 
     private IReadOnlyCollection<string>? _selectedSeverity;
@@ -278,9 +270,6 @@ else
 
     private async Task AddCodeSnippetsAsync(Run run)
     {
-        _snippetLoadingCts?.Cancel();
-        _snippetLoadingCts?.Dispose();
-        _snippetLoadingCts = new CancellationTokenSource();
         _isLoadingSnippets = true;
 
         try
@@ -288,8 +277,7 @@ else
             var (success, errorMessage) = await CodeSnippetService.AddCodeSnippetsToRunAsync(
                 run,
                 onSnippetAdded: () => InvokeAsync(StateHasChanged),
-                batchSize: 25,
-                cancellationToken: _snippetLoadingCts.Token);
+                batchSize: 25);
 
             if (!success)
             {
@@ -299,15 +287,8 @@ else
         finally
         {
             _isLoadingSnippets = false;
-            _snippetLoadingCts?.Dispose();
-            _snippetLoadingCts = null;
             await InvokeAsync(StateHasChanged);
         }
-    }
-
-    private void CancelSnippetLoading()
-    {
-        _snippetLoadingCts?.Cancel();
     }
 
     private async Task LoadSnippetAsync(Run run, Result result)
@@ -349,12 +330,5 @@ else
     {
         _filterVersion++;
     }
-
-    public void Dispose()
-    {
-        _snippetLoadingCts?.Cancel();
-        _snippetLoadingCts?.Dispose();
-    }
-
 
 }
