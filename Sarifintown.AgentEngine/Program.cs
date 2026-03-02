@@ -33,6 +33,7 @@ SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
 SarifTools.TreeSitterEngine = treeSitter;
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
+SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
 
 await app.StartAsync();
 

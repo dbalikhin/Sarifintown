@@ -17,6 +17,7 @@ namespace Sarifintown.AgentEngine
         private static readonly object SyncRoot = new();
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
+        private static string _workspaceRoot = Directory.GetCurrentDirectory();
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -97,6 +98,19 @@ namespace Sarifintown.AgentEngine
             }
         }
 
+        public static void SetWorkspaceRoot(string workspaceRoot)
+        {
+            if (string.IsNullOrWhiteSpace(workspaceRoot))
+            {
+                throw new ArgumentException("Workspace root is required.", nameof(workspaceRoot));
+            }
+
+            lock (SyncRoot)
+            {
+                _workspaceRoot = Path.GetFullPath(workspaceRoot);
+            }
+        }
+
         [McpServerTool]
         [Description("Returns all SARIF files discovered in the current workspace .sarif folder at server startup.")]
         public static string ListWorkspaceSarifFiles()
@@ -114,6 +128,95 @@ namespace Sarifintown.AgentEngine
             });
 
             return JsonSerializer.Serialize(payload);
+        }
+
+        [McpServerTool]
+        [Description("Provides a 10,000-foot security posture summary from loaded SARIF findings and local .sarif/triage.json state.")]
+        public static async Task<string> TriageStatus()
+        {
+            var workflow = CreateTriageWorkflowService();
+            var status = await workflow.GetStatusAsync();
+            return JsonSerializer.Serialize(status);
+        }
+
+        [McpServerTool]
+        [Description("Returns prioritized findings with optional filters: severity, rule, file, state, and limit.")]
+        public static async Task<string> TriageList(
+            string severity = "",
+            string rule = "",
+            string file = "",
+            string state = "",
+            int limit = 10)
+        {
+            var workflow = CreateTriageWorkflowService();
+            var findings = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit));
+            return JsonSerializer.Serialize(findings);
+        }
+
+        [McpServerTool]
+        [Description("Alias of TriageList for query-oriented clients.")]
+        public static Task<string> TriageQuery(
+            string severity = "",
+            string rule = "",
+            string file = "",
+            string state = "",
+            int limit = 10)
+        {
+            return TriageList(severity, rule, file, state, limit);
+        }
+
+        [McpServerTool]
+        [Description("Returns dense technical evidence for a single finding including ordered data flow steps and method snippets.")]
+        public static async Task<string> TriageInspect(string findingId)
+        {
+            var workflow = CreateTriageWorkflowService();
+            var inspect = await workflow.InspectAsync(findingId);
+
+            if (inspect == null)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    success = false,
+                    message = $"Finding not found: {findingId}"
+                });
+            }
+
+            return JsonSerializer.Serialize(inspect);
+        }
+
+        [McpServerTool]
+        [Description("Records a TP/FP triage decision for one finding in .sarif/triage.json.")]
+        public static async Task<string> Triage(
+            string findingId,
+            string state,
+            string reason,
+            string author = "AI")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var result = await workflow.TriageAsync(findingId, state, reason, author);
+            return JsonSerializer.Serialize(result);
+        }
+
+        [McpServerTool]
+        [Description("Applies TP/FP triage to multiple findings using list filters. At least one of severity/rule/file is required.")]
+        public static async Task<string> TriageBulk(
+            string state,
+            string reason,
+            string severity = "",
+            string rule = "",
+            string file = "",
+            bool dryRun = false,
+            string author = "AI")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var result = await workflow.TriageBulkAsync(
+                state,
+                reason,
+                new TriageQueryOptions(severity, rule, file, string.Empty, int.MaxValue),
+                dryRun,
+                author);
+
+            return JsonSerializer.Serialize(result);
         }
 
         [McpServerTool]
@@ -151,9 +254,17 @@ namespace Sarifintown.AgentEngine
             }
 
             string selectedAction = string.Empty;
+            string commandResult = string.Empty;
             if (startCliMenu)
             {
                 selectedAction = SpectreCliMenu.Start();
+                if (selectedAction.StartsWith("Triage ", StringComparison.Ordinal))
+                {
+                    commandResult = SpectreCliMenu
+                        .ExecuteTriageActionAsync(CreateTriageWorkflowService(), selectedAction)
+                        .GetAwaiter()
+                        .GetResult();
+                }
             }
 
             return JsonSerializer.Serialize(new
@@ -167,6 +278,7 @@ namespace Sarifintown.AgentEngine
                 {
                     library = "Spectre.Console",
                     action = selectedAction,
+                    action_result = commandResult,
                     menu = "interactive"
                 }
             });
@@ -379,6 +491,25 @@ namespace Sarifintown.AgentEngine
             }
 
             return sarifPath;
+        }
+
+        private static TriageWorkflowService CreateTriageWorkflowService()
+        {
+            if (FileReader == null || TreeSitterEngine == null)
+            {
+                throw new InvalidOperationException("Core engines are not initialized.");
+            }
+
+            List<string> discoveredFiles;
+            string workspaceRoot;
+
+            lock (SyncRoot)
+            {
+                discoveredFiles = _discoveredSarifFiles.ToList();
+                workspaceRoot = _workspaceRoot;
+            }
+
+            return new TriageWorkflowService(FileReader, TreeSitterEngine, workspaceRoot, discoveredFiles);
         }
 
         private static string DetectHost(McpServer thisServer, string hostHint)
