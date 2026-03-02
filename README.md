@@ -1,14 +1,15 @@
 # Sarifintown
 
-Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysis Results Interchange Format) files and extracting code snippets from source code. 
+Sarifintown is a Blazor WebAssembly solution for analyzing SARIF (Static Analysis Results Interchange Format) files and extracting code snippets from source code.
 
 MCP server support is available via `Sarifintown.Engine`; see the concise setup guide in [`MCP_SETUP.md`](MCP_SETUP.md).
 
 ## Projects
 
-- **Sarifintown.UI**: Blazor WebAssembly app for SARIF analysis and code snippet extraction.
-- **Sarifintown.Core**: Core library containing models, helpers, and shared logic.
-- **Sarifintown.UI.Tests**: Test project using NUnit, bUnit, and Playwright for automated testing.
+- **Sarifintown.UI**: Blazor WebAssembly app for SARIF analysis, triage, and code snippet extraction.
+- **Sarifintown.Core**: Shared models, helpers, and SARIF processing logic.
+- **Sarifintown.Engine**: MCP server and CLI/TUI entrypoint for agent and terminal workflows.
+- **Sarifintown.Tests**, **Sarifintown.Core.Tests**, **Sarifintown.Engine.Tests**: NUnit test projects.
 
 ## Features
 
@@ -20,6 +21,8 @@ MCP server support is available via `Sarifintown.Engine`; see the concise setup 
 - Extract whole methods with Tree-sitter WASM grammars to improve code flow analysis.
 - Responsive UI built with MudBlazor.
 - Group and filter results by severity, rule and file path.
+- MCP tools for SARIF discovery, filtering, flow extraction, analysis report generation, and triage workflows.
+- Shared triage state persisted in `.sarif/triage.json` for MCP/CLI triage commands.
 
 ## Prerequisites
 
@@ -40,6 +43,18 @@ MCP server support is available via `Sarifintown.Engine`; see the concise setup 
 
 4. **Full Details Analysis**  
    If a SARIF file contains the code flow, you can view code threads and highlights using Tree-sitter grammars.
+
+## MCP triage workflow commands
+
+`Sarifintown.Engine` exposes a shared triage workflow through MCP tools:
+
+- `TriageStatus`
+- `TriageList` (and alias `TriageQuery`)
+- `TriageInspect`
+- `Triage`
+- `TriageBulk`
+
+These commands use loaded SARIF findings and persist decision state to `.sarif/triage.json`.
 
 ## License
 

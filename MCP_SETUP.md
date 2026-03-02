@@ -48,12 +48,6 @@ sarifintown
 dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 ```
 
-## Option C: run with alternate tool command (if present in your environment)
-
-```bash
-sarifintown-agent
-```
-
 ---
 
 ## Generic MCP stdio configuration (works with most AI IDEs)
@@ -224,7 +218,7 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 - `transport`: must be `stdio` for this server mode.
 - `command` + `args`: starts the MCP server process.
 - `cwd`: optional but useful for predictable relative paths.
-- `env.PROJECT_ROOT`: **required** for correct SARIF discovery from `.sarif/`.
+- `env.PROJECT_ROOT`: recommended for deterministic `.sarif` discovery in multi-root or custom launch environments.
 - `DOTNET_ENVIRONMENT`: optional; this project does not require it for MCP behavior.
 
 ### Path guidance
@@ -245,6 +239,36 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 6. Call `LoadAndFilterSarif` using either:
    - full SARIF path, or
    - filename discovered at startup (for example: `scan1.sarif`).
+7. Call `TriageStatus` to confirm triage state aggregation from `.sarif/triage.json`.
+8. Call `TriageList` and `TriageInspect` for finding prioritization and evidence retrieval.
+
+---
+
+## MCP tools currently exposed by `Sarifintown.Engine`
+
+### Discovery and routing
+
+- `ListWorkspaceSarifFiles`
+- `ResolveInteractiveSurface`
+
+### Analysis and extraction
+
+- `LoadAndFilterSarif`
+- `ExtractCodeFlow`
+- `GenerateAnalysisReport`
+
+### Triage workflow
+
+- `TriageStatus`
+- `TriageList`
+- `TriageQuery` (alias of `TriageList`)
+- `TriageInspect`
+- `Triage`
+- `TriageBulk`
+
+Triage decisions are persisted to `<workspace>/.sarif/triage.json`.
+
+Note: Tool responses are JSON serialized from .NET types and therefore use `PascalCase` property names unless otherwise noted.
 
 ---
 
