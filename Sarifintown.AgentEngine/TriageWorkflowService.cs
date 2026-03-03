@@ -944,6 +944,33 @@ internal sealed class TriageWorkflowService
 
     private bool TryParseDecisionState(string state, out TriageFindingState parsed)
     {
+        if (string.IsNullOrWhiteSpace(state))
+        {
+            parsed = TriageFindingState.Open;
+            return false;
+        }
+
+        var normalized = state.Trim().Replace('-', ' ').Replace('_', ' ');
+        normalized = Regex.Replace(normalized, "\\s+", " ");
+
+        if (string.Equals(normalized, "TP", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "TRUE POSITIVE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "TRUEPOSITIVE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "TRUEPOS", StringComparison.OrdinalIgnoreCase))
+        {
+            parsed = TriageFindingState.TP;
+            return true;
+        }
+
+        if (string.Equals(normalized, "FP", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "FALSE POSITIVE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "FALSEPOSITIVE", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "FALSEPOS", StringComparison.OrdinalIgnoreCase))
+        {
+            parsed = TriageFindingState.FP;
+            return true;
+        }
+
         if (Enum.TryParse<TriageFindingState>(state, true, out parsed)
             && parsed is TriageFindingState.TP or TriageFindingState.FP)
         {
@@ -1004,23 +1031,12 @@ internal sealed class TriageWorkflowService
 
     private string ResolveFindingPath(TriageFindingEnvelope finding, PhysicalLocation.PhysicalLocationArtifactLocation? artifactLocation)
     {
-        var resolved = FileHelper.ResolveArtifactPath(artifactLocation, finding.Run);
-        if (string.IsNullOrWhiteSpace(resolved))
-        {
-            resolved = artifactLocation?.Uri ?? string.Empty;
-        }
-
-        if (string.IsNullOrWhiteSpace(resolved))
+        if (artifactLocation == null)
         {
             return string.Empty;
         }
 
-        if (Path.IsPathRooted(resolved))
-        {
-            return resolved;
-        }
-
-        return Path.Combine(_workspaceRoot, resolved.Replace('/', Path.DirectorySeparatorChar));
+        return FileHelper.ResolvePathForWorkspace(artifactLocation, finding.Run, _workspaceRoot);
     }
 
     private async Task<string> ExtractSnippetAsync(

@@ -383,20 +383,7 @@ namespace Sarifintown.AgentEngine
                         var relativePath = physLoc.ArtifactLocation?.Uri;
                         if (string.IsNullOrEmpty(relativePath)) continue;
 
-                        var resolvedPath = FileHelper.ResolveArtifactPath(physLoc.ArtifactLocation, targetRun);
-                        var candidatePath = string.IsNullOrWhiteSpace(resolvedPath) ? relativePath : resolvedPath;
-                        var fullPath = Path.IsPathRooted(candidatePath)
-                            ? candidatePath
-                            : Path.Combine(sourceCodeRoot, candidatePath.Replace("file://", "").TrimStart('/'));
-
-                        if (!File.Exists(fullPath))
-                        {
-                            var fallbackByFileName = Path.Combine(sourceCodeRoot, Path.GetFileName(candidatePath));
-                            if (File.Exists(fallbackByFileName))
-                            {
-                                fullPath = fallbackByFileName;
-                            }
-                        }
+                        var fullPath = FileHelper.ResolvePathForWorkspace(physLoc.ArtifactLocation, targetRun, sourceCodeRoot);
 
                         string snippetCode = "Source file unavailable";
 

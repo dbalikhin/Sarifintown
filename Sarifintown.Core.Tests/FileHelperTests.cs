@@ -103,5 +103,67 @@ namespace Sarifintown.Core.Tests
             Assert.That(result.adjustedPath, Is.EqualTo("RepoFolder/Pages/Error.cshtml.cs"));
             Assert.That(result.matchedFolder, Is.EqualTo(folder));
         }
+
+        [Test]
+        public void ResolvePathForWorkspace_WhenSourceIsOneLevelDeeper_ReturnsNestedPath()
+        {
+            var workspaceRoot = Path.Combine(Path.GetTempPath(), $"sarifintown-{Guid.NewGuid():N}");
+            var nestedProjectRoot = Path.Combine(workspaceRoot, "SharpSaster");
+            Directory.CreateDirectory(Path.Combine(nestedProjectRoot, "Controllers"));
+
+            var expectedPath = Path.Combine(nestedProjectRoot, "Controllers", "SqlAdvancedController.cs");
+            File.WriteAllText(expectedPath, "class SqlAdvancedController { }");
+
+            try
+            {
+                var run = new Run();
+                var artifact = new PhysicalLocation.PhysicalLocationArtifactLocation
+                {
+                    Uri = "Controllers/SqlAdvancedController.cs"
+                };
+
+                var resolvedPath = FileHelper.ResolvePathForWorkspace(artifact, run, workspaceRoot);
+
+                Assert.That(Path.GetFullPath(resolvedPath), Is.EqualTo(Path.GetFullPath(expectedPath)));
+            }
+            finally
+            {
+                Directory.Delete(workspaceRoot, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ResolvePathForWorkspace_WithOriginalUriBaseIdAndWorkspaceRebase_ResolvesExistingFile()
+        {
+            var workspaceRoot = Path.Combine(Path.GetTempPath(), $"sarifintown-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path.Combine(workspaceRoot, "src"));
+            var expectedPath = Path.Combine(workspaceRoot, "src", "Auth.cs");
+            File.WriteAllText(expectedPath, "class Auth { }");
+
+            try
+            {
+                var run = new Run
+                {
+                    OriginalUriBaseIds = new Dictionary<string, UriBaseId>
+                    {
+                        ["SRCROOT"] = new UriBaseId { Uri = "file:///repo/" }
+                    }
+                };
+
+                var artifact = new PhysicalLocation.PhysicalLocationArtifactLocation
+                {
+                    Uri = "src/Auth.cs",
+                    UriBaseId = "SRCROOT"
+                };
+
+                var resolvedPath = FileHelper.ResolvePathForWorkspace(artifact, run, workspaceRoot);
+
+                Assert.That(Path.GetFullPath(resolvedPath), Is.EqualTo(Path.GetFullPath(expectedPath)));
+            }
+            finally
+            {
+                Directory.Delete(workspaceRoot, recursive: true);
+            }
+        }
     }
 }
