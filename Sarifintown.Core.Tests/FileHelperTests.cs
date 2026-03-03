@@ -86,5 +86,22 @@ namespace Sarifintown.Core.Tests
 
             Assert.That(rebased, Is.EqualTo("src/a.cs"));
         }
+
+        [Test]
+        public void AdjustPathToGrantedFolder_ScannerRootRelativePath_PrependsSingleProjectFolder()
+        {
+            var folder = new DirectoryPicker
+            {
+                Id = 1,
+                Name = "repo",
+                Subdirectories = new List<string> { "repo/.sarif", "repo/RepoFolder" }
+            };
+
+            var result = FileHelper.AdjustPathToGrantedFolder("Pages/Error.cshtml.cs", new[] { folder }, out var error);
+
+            Assert.That(error, Is.Null);
+            Assert.That(result.adjustedPath, Is.EqualTo("RepoFolder/Pages/Error.cshtml.cs"));
+            Assert.That(result.matchedFolder, Is.EqualTo(folder));
+        }
     }
 }

@@ -160,6 +160,11 @@ namespace Sarifintown.Helpers
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
+                var inferredScannerRootCandidates = immediateChildren
+                    .Where(child => !string.IsNullOrWhiteSpace(child))
+                    .Where(child => !child.StartsWith(".", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+
                 // Case: "parent/child" → just "child"
                 if (pathSegments.Length >= 2 &&
                     pathSegments[0].Equals(name, StringComparison.OrdinalIgnoreCase) &&
@@ -211,6 +216,16 @@ namespace Sarifintown.Helpers
 
                     int bonus = flex.MatchedLength * 10 + flex.SubdirDepth;
                     AddCandidate(ref best, adjusted, folder, MatchTier.Flexible, bonus);
+                }
+
+                // Case: SARIF paths relative to scanner root (for example "Pages/Error.cshtml.cs")
+                if (inferredScannerRootCandidates.Length == 1
+                    && pathSegments.Length > 0
+                    && !pathSegments[0].Equals(name, StringComparison.OrdinalIgnoreCase)
+                    && !pathSegments[0].Equals(inferredScannerRootCandidates[0], StringComparison.OrdinalIgnoreCase))
+                {
+                    var inferredAdjusted = $"{inferredScannerRootCandidates[0]}/{string.Join("/", pathSegments)}";
+                    AddCandidate(ref best, inferredAdjusted, folder, MatchTier.Flexible, bonus: 1);
                 }
             }
 
