@@ -767,6 +767,138 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
+        public async Task TriageStatusGuided_ReturnsDirectiveAndNextStepMetadata()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-status.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-GUIDED",
+                      "level": "warning",
+                      "message": { "text": "Guided status" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageStatusGuided();
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("protocol").GetString(), Is.EqualTo("sarifintown.guided.v1"));
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("pause").GetProperty("required").GetBoolean(), Is.True);
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task TriageListGuided_ReturnsTableAndInspectNextStep()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-list.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-LIST",
+                      "level": "error",
+                      "message": { "text": "Guided list" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/list.cs" },
+                            "region": { "startLine": 12 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageListGuided(limit: 5);
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageInspectGuided"));
+                Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("| FindingId | Severity | State | Rule | Location |"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task TriageInspectGuided_WithUnknownFinding_ReturnsListRecoveryStep()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-inspect.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-INSPECT",
+                      "level": "warning",
+                      "message": { "text": "Guided inspect" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageInspectGuided("missing-id");
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("Finding Not Found"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
         public void ResolveInteractiveSurface_WithVsCodeHostHint_ReturnsUiMode()
         {
             // Act

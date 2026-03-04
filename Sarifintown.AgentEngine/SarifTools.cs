@@ -112,7 +112,7 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Returns all SARIF files discovered in the current workspace .sarif folder at server startup.")]
+        [Description("MUST: Call this tool first to enumerate SARIF files discovered at server startup before any SARIF-path-dependent operation.")]
         public static string ListWorkspaceSarifFiles()
         {
             List<string> files;
@@ -131,7 +131,7 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Provides a 10,000-foot security posture summary from loaded SARIF findings and local .sarif/triage.json state.")]
+        [Description("MUST: Use this tool to obtain authoritative triage posture from loaded SARIF findings and local .sarif/triage.json state.")]
         public static async Task<string> TriageStatus()
         {
             var workflow = CreateTriageWorkflowService();
@@ -140,12 +140,46 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Returns prioritized findings with optional filters: severity, rule, file, state, and limit.")]
+        [Description("MUST: Start autonomous triage flow with this guided tool. Render markdown verbatim, then follow next_step; do not use terminal commands for SARIF-domain actions.")]
+        public static async Task<string> TriageStatusGuided()
+        {
+            var workflow = CreateTriageWorkflowService();
+            var status = await workflow.GetStatusAsync();
+
+            var markdown = $"""
+            ## SARIF Triage Status
+
+            - Total findings: **{status.TotalFindings}**
+            - Open findings: **{status.OpenCount}**
+            - Triaged findings: **{status.TriagedCount}**
+            - True positives: **{status.TruePositiveCount}**
+            - False positives: **{status.FalsePositiveCount}**
+
+            **Next action:** Reply with `list` to review prioritized findings.
+            """;
+
+            return CreateGuidedResponse(
+                workflowName: "triage-status",
+                data: status,
+                markdown: markdown,
+                nextTool: "TriageListGuided",
+                nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
+                pauseForUserInput: true,
+                pausePrompt: "Reply with `list` to continue to prioritized findings.");
+        }
+
+        [McpServerTool]
+        [Description("MUST: Use this tool to retrieve prioritized findings with filters; do not infer finding sets without calling it.")]
         public static async Task<string> TriageList(
+            [Description("Optional severity filter (for example: High, Medium, Low).")]
             string severity = "",
+            [Description("Optional rule-id or rule-name filter.")]
             string rule = "",
+            [Description("Optional file path filter (supports wildcard patterns handled by workflow service).")]
             string file = "",
+            [Description("Optional triage state filter (Open, TP, FP).")]
             string state = "",
+            [Description("Maximum findings to return.")]
             int limit = 10)
         {
             var workflow = CreateTriageWorkflowService();
@@ -154,20 +188,57 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Alias of TriageList for query-oriented clients.")]
-        public static Task<string> TriageQuery(
+        [Description("MUST: Use this guided listing tool for autonomous chaining; response includes enforced next_step and pause directives.")]
+        public static async Task<string> TriageListGuided(
+            [Description("Optional severity filter (for example: High, Medium, Low).")]
             string severity = "",
+            [Description("Optional rule-id or rule-name filter.")]
             string rule = "",
+            [Description("Optional file path filter.")]
             string file = "",
+            [Description("Optional triage state filter (Open, TP, FP).")]
             string state = "",
+            [Description("Maximum findings to return.")]
+            int limit = 10)
+        {
+            var workflow = CreateTriageWorkflowService();
+            var findings = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit));
+
+            var markdown = BuildGuidedFindingsMarkdown(findings);
+            return CreateGuidedResponse(
+                workflowName: "triage-list",
+                data: findings,
+                markdown: markdown,
+                nextTool: "TriageInspectGuided",
+                nextToolArguments: new { findingId = "<reply-with-finding-id>", evidenceMode = "line-window-concatenated" },
+                pauseForUserInput: true,
+                pausePrompt: "Reply with a FindingId from the table to inspect technical evidence.");
+        }
+
+        [McpServerTool]
+        [Description("Use this query-named alias when the MCP client requires query-style tool naming; behavior matches TriageList.")]
+        public static Task<string> TriageQuery(
+            [Description("Optional severity filter.")]
+            string severity = "",
+            [Description("Optional rule-id or rule-name filter.")]
+            string rule = "",
+            [Description("Optional file path filter.")]
+            string file = "",
+            [Description("Optional triage state filter.")]
+            string state = "",
+            [Description("Maximum findings to return.")]
             int limit = 10)
         {
             return TriageList(severity, rule, file, state, limit);
         }
 
         [McpServerTool]
-        [Description("Returns dense technical evidence for a single finding including ordered data flow steps and method snippets.")]
-        public static async Task<string> TriageInspect(string findingId, string evidenceMode = "")
+        [Description("MUST: Use this tool for authoritative technical evidence of one finding, including ordered data-flow and snippets.")]
+        public static async Task<string> TriageInspect(
+            [Description("Finding identifier returned by TriageList or TriageListGuided.")]
+            string findingId,
+            [Description("Optional evidence mode override (for example: line-window-strict, line-window-concatenated, tree-sitter-method).")]
+            string evidenceMode = "")
         {
             var workflow = CreateTriageWorkflowService();
             var inspect = await workflow.InspectAsync(findingId, evidenceMode);
@@ -185,11 +256,57 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Records a TP/FP triage decision for one finding in .sarif/triage.json.")]
-        public static async Task<string> Triage(
+        [Description("MUST: Use this guided inspection tool in autonomous workflows. Render markdown verbatim and execute explicit next_step triage action.")]
+        public static async Task<string> TriageInspectGuided(
+            [Description("Finding identifier returned by guided list output.")]
             string findingId,
+            [Description("Optional evidence mode override.")]
+            string evidenceMode = "")
+        {
+            var workflow = CreateTriageWorkflowService();
+            var inspect = await workflow.InspectAsync(findingId, evidenceMode);
+
+            if (inspect == null)
+            {
+                var notFoundMarkdown = $"""
+                ## Finding Not Found
+
+                No finding matched `{findingId}`.
+
+                **Next action:** Run a filtered list again and select a valid FindingId.
+                """;
+
+                return CreateGuidedResponse(
+                    workflowName: "triage-inspect",
+                    data: new { success = false, message = $"Finding not found: {findingId}" },
+                    markdown: notFoundMarkdown,
+                    nextTool: "TriageListGuided",
+                    nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
+                    pauseForUserInput: true,
+                    pausePrompt: "Reply with `list` to load findings, then provide a valid FindingId.");
+            }
+
+            var markdown = BuildGuidedInspectMarkdown(inspect);
+            return CreateGuidedResponse(
+                workflowName: "triage-inspect",
+                data: inspect,
+                markdown: markdown,
+                nextTool: "Triage",
+                nextToolArguments: new { findingId = inspect.FindingId, state = "TP|FP", reason = "<required>", author = "AI" },
+                pauseForUserInput: true,
+                pausePrompt: "Reply with `TP <reason>` or `FP <reason>` to record a triage decision.");
+        }
+
+        [McpServerTool]
+        [Description("MUST: Use this tool to persist a TP/FP triage decision for one finding into .sarif/triage.json.")]
+        public static async Task<string> Triage(
+            [Description("Target finding identifier.")]
+            string findingId,
+            [Description("Decision state to persist (TP or FP; natural-language aliases are normalized by workflow service).")]
             string state,
+            [Description("Required reason for the decision.")]
             string reason,
+            [Description("Decision author label.")]
             string author = "AI")
         {
             var workflow = CreateTriageWorkflowService();
@@ -198,14 +315,21 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Applies TP/FP triage to multiple findings using list filters. At least one of severity/rule/file is required.")]
+        [Description("MUST: Use this tool for bulk TP/FP triage updates using filters. At least one of severity/rule/file is required.")]
         public static async Task<string> TriageBulk(
+            [Description("Decision state to apply (TP or FP).")]
             string state,
+            [Description("Required reason applied to affected findings.")]
             string reason,
+            [Description("Optional severity filter.")]
             string severity = "",
+            [Description("Optional rule filter.")]
             string rule = "",
+            [Description("Optional file filter.")]
             string file = "",
+            [Description("When true, preview affected findings without persisting changes.")]
             bool dryRun = false,
+            [Description("Decision author label.")]
             string author = "AI")
         {
             var workflow = CreateTriageWorkflowService();
@@ -220,10 +344,13 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Routes to the best interactive experience for the connected MCP host. Returns ui:// URI for IDE hosts and Spectre.Console TUI metadata for CLI hosts.")]
+        [Description("MUST: Use this tool to resolve the correct interactive surface for the connected host before launching UI/TUI experiences.")]
         public static string ResolveInteractiveSurface(
+            [Description("Active MCP server instance; used for host detection.")]
             McpServer thisServer,
+            [Description("Optional explicit host hint override (for example: Visual Studio Code, Cursor, Claude Code, Rider).")]
             string hostHint = "",
+            [Description("When true for CLI mode, starts the Spectre.Console menu immediately.")]
             bool startCliMenu = false)
         {
             var host = DetectHost(thisServer, hostHint);
@@ -285,11 +412,15 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Parses a SARIF file and filters security issues by category, severity, or rule ID. Returns a JSON list of matching issues.")]
+        [Description("MUST: Use this tool to parse a SARIF file and apply category/severity/rule filters. Do not infer filtered issues without this call.")]
         public static async Task<string> LoadAndFilterSarif(
+            [Description("SARIF file path (absolute or filename discovered at startup).")]
             string sarifPath,
+            [Description("Optional severity filter.")]
             string severity = "",
+            [Description("Optional rule-id filter.")]
             string ruleId = "",
+            [Description("Optional category keyword filter matched against message and rule id.")]
             string category = "")
         {
             if (FileReader == null) throw new InvalidOperationException("FileReader is not initialized.");
@@ -338,10 +469,13 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Extracts the full data flow (source to sink) for a specific SARIF issue using Tree-sitter AST extraction. Returns a JSON trace.")]
+        [Description("MUST: Use this tool to extract source-to-sink data flow for a SARIF issue using Tree-sitter and fallback snippet windows.")]
         public static async Task<string> ExtractCodeFlow(
+            [Description("SARIF file path (absolute or filename discovered at startup).")]
             string sarifPath,
+            [Description("Result index from flattened SARIF results.")]
             string resultId,
+            [Description("Workspace source-code root used to resolve artifact paths.")]
             string sourceCodeRoot)
         {
             if (FileReader == null || TreeSitterEngine == null)
@@ -501,6 +635,103 @@ namespace Sarifintown.AgentEngine
             }
 
             return sarifPath;
+        }
+
+        private static string CreateGuidedResponse(
+            string workflowName,
+            object data,
+            string markdown,
+            string nextTool,
+            object nextToolArguments,
+            bool pauseForUserInput,
+            string pausePrompt)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                protocol = "sarifintown.guided.v1",
+                workflow = workflowName,
+                llm_directive = "INSTRUCTIONS FOR LLM: Output the following markdown verbatim. Do not summarize or rephrase. After rendering, respect pause.required.",
+                markdown,
+                next_step = new
+                {
+                    tool = nextTool,
+                    arguments = nextToolArguments
+                },
+                pause = new
+                {
+                    required = pauseForUserInput,
+                    prompt = pausePrompt
+                },
+                data
+            });
+        }
+
+        private static string BuildGuidedFindingsMarkdown(IReadOnlyList<TriageListItem> findings)
+        {
+            if (findings.Count == 0)
+            {
+                return """
+                ## Prioritized Findings
+
+                No findings matched the provided filters.
+
+                **Next action:** Adjust filters and call `TriageListGuided` again.
+                """;
+            }
+
+            var lines = findings
+                .Select(item => $"| `{EscapeMarkdown(item.FindingId)}` | `{EscapeMarkdown(item.Severity)}` | `{EscapeMarkdown(item.State)}` | `{EscapeMarkdown(item.RuleName)}` | `{EscapeMarkdown(item.FilePath)}`:{item.LineNumber?.ToString() ?? "?"} |")
+                .ToList();
+
+            return string.Join(Environment.NewLine,
+            [
+                "## Prioritized Findings",
+                string.Empty,
+                "| FindingId | Severity | State | Rule | Location |",
+                "|---|---|---|---|---|",
+                .. lines,
+                string.Empty,
+                "**Next action:** Reply with a `FindingId` value to inspect evidence.",
+                "Then pause for user input."
+            ]);
+        }
+
+        private static string BuildGuidedInspectMarkdown(TriageInspectResult inspect)
+        {
+            var evidenceRows = inspect.DataFlowEvidenceBlocks
+                .Select(block => $"- Steps {block.StartStepIndex}-{block.EndStepIndex} in `{EscapeMarkdown(block.FilePath)}` ({block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}) via `{EscapeMarkdown(block.Mode)}`")
+                .ToList();
+
+            if (evidenceRows.Count == 0)
+            {
+                evidenceRows.Add("- No data-flow evidence blocks were produced for this finding.");
+            }
+
+            return string.Join(Environment.NewLine,
+            [
+                "## Finding Inspection",
+                string.Empty,
+                $"- FindingId: `{EscapeMarkdown(inspect.FindingId)}`",
+                $"- Rule: `{EscapeMarkdown(inspect.RuleId)}`",
+                $"- Severity: `{EscapeMarkdown(inspect.Severity)}`",
+                $"- State: `{EscapeMarkdown(inspect.State)}`",
+                string.Empty,
+                "### Evidence Blocks",
+                .. evidenceRows,
+                string.Empty,
+                "**Next action:** Reply with `TP <reason>` or `FP <reason>` to store triage state.",
+                "Then pause for user input."
+            ]);
+        }
+
+        private static string EscapeMarkdown(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            return value.Replace("|", "\\|", StringComparison.Ordinal);
         }
 
         private static TriageWorkflowService CreateTriageWorkflowService()
@@ -732,10 +963,13 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("Compiles extracted JSON data flow into a formatted markdown file (result.md) to be used for secondary AI analysis.")]
+        [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
         public static string GenerateAnalysisReport(
+            [Description("Result identifier for report metadata.")]
             string resultId,
+            [Description("Extracted flow JSON payload returned by ExtractCodeFlow.")]
             string extractedFlowData,
+            [Description("Destination markdown file path.")]
             string outputPath)
         {
             try

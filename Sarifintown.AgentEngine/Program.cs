@@ -17,7 +17,8 @@ builder.Services.AddSingleton<IPromptAssemblyService, PromptAssemblyService>();
 // Register MCP Server (if using the prerelease SDK)
 builder.Services.AddMcpServer()
        .WithStdioServerTransport()
-       .WithToolsFromAssembly();
+       .WithToolsFromAssembly()
+       .WithPromptsFromAssembly();
 
 var app = builder.Build();
 
