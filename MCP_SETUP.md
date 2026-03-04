@@ -2,6 +2,20 @@
 
 This guide explains how to configure the `Sarifintown.Engine` as an MCP server in AI IDEs.
 
+## Portable enforcement architecture (recommended)
+
+Use these layers together to enforce consistent MCP behavior across GitHub Copilot, Visual Studio, JetBrains, and terminal clients without custom IDE extensions.
+
+1. Workspace-level instruction files in repo root:
+   - `.github/copilot-instructions.md` (create a similar "global" instruction for other IDEs)
+2. Server-side MCP primitives:
+   - aggressive `[Description]` text on guided MCP tools
+   - native `[McpServerPrompt]` prompts for slash-command style workflow triggers
+3. Chained tool payloads:
+   - guided tools return explicit `next_step` metadata
+4. Markdown pass-through payloads:
+   - guided tools include an `llm_directive` requiring verbatim markdown render and user-input pause
+
 ## What the server does at startup
 
 When the server starts, it:
@@ -50,18 +64,24 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 
 ---
 
-## Generic MCP stdio configuration (works with most AI IDEs)
+## MCP stdio configuration (IDE schemas)
 
-Many IDEs use a JSON file (`mcp.json`, `settings.json`, or similar) with an MCP servers section.
+Different MCP clients use different top-level keys for server registration.
 
-If your IDE already injects workspace context, you usually do not need to add any `env` values manually.
+- Visual Studio / VS Code style: `"servers"`
+- Cursor / Claude Code style: `"mcpServers"`
 
-Use this pattern (Windows example):
+The server payload is the same in both styles (`transport`, `command`, `args`, optional `cwd`, optional `env`).
+
+If your IDE already injects workspace context, you usually do not need to add `env` values manually.
+
+### Visual Studio / VS Code style (`"servers"`)
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "sarifintown": {
+      "transport": "stdio",
       "command": "sarifintown",
       "args": [],
       "env": {
@@ -72,12 +92,13 @@ Use this pattern (Windows example):
 }
 ```
 
-macOS/Linux example:
+macOS/Linux path variant:
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "sarifintown": {
+      "transport": "stdio",
       "command": "sarifintown",
       "args": [],
       "env": {
@@ -88,12 +109,67 @@ macOS/Linux example:
 }
 ```
 
-> Different IDEs may use different top-level keys, but the important values are the same: `command`, `args`, and `env.PROJECT_ROOT`.
+### Cursor / Claude Code style (`"mcpServers"`)
+
+```json
+{
+  "mcpServers": {
+    "sarifintown": {
+      "transport": "stdio",
+      "command": "sarifintown",
+      "args": [],
+      "env": {
+        "PROJECT_ROOT": "/path/to/your/workspace"
+      }
+    }
+  }
+}
+```
+
+> Different IDEs may use different top-level keys, but the important values are the same: `transport`, `command`, `args`, and `env.PROJECT_ROOT`.
 
 Common workspace placeholders in IDE configs include `${workspaceFolder}`, `{workspaceFolder}`, and `${workspaceRoot}`.
 If a placeholder is passed through literally (not expanded), `sarifintown` ignores it and falls back to the next available workspace source.
 
 If you cannot use the global tool in your IDE, use `dotnet run --project ...` as fallback.
+
+### Client-specific examples
+
+#### Cursor (`mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "sarifintown": {
+      "transport": "stdio",
+      "command": "sarifintown",
+      "args": [],
+      "env": {
+        "PROJECT_ROOT": "C:/path/to/your/workspace",
+        "MCP_CLIENT_NAME": "Cursor"
+      }
+    }
+  }
+}
+```
+
+#### Claude Code (`mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "sarifintown": {
+      "transport": "stdio",
+      "command": "sarifintown",
+      "args": [],
+      "env": {
+        "PROJECT_ROOT": "/path/to/your/workspace",
+        "MCP_CLIENT_NAME": "Claude Code"
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -127,6 +203,8 @@ Notes:
 
 ### Example terminal client config (`mcp.json` style)
 
+Most terminal-first MCP clients use `"mcpServers"`; if your client expects `"servers"`, keep the same server object and only switch the top-level key.
+
 ```json
 {
   "mcpServers": {
@@ -155,11 +233,16 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 
 ## Detailed sample for a typical `mcp.json`
 
+Use the same server body for both schema styles:
+
+- wrap with `"servers"` for Visual Studio / VS Code style
+- wrap with `"mcpServers"` for Cursor / Claude Code style
+
 ### Windows (preferred global tool)
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "sarifintown": {
       "transport": "stdio",
       "command": "sarifintown",
@@ -177,7 +260,7 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "sarifintown": {
       "transport": "stdio",
       "command": "sarifintown",
@@ -195,7 +278,7 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "sarifintown": {
       "transport": "stdio",
       "command": "dotnet",
@@ -265,6 +348,23 @@ dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj
 - `TriageInspect`
 - `Triage`
 - `TriageBulk`
+
+### Guided triage workflow (recommended for autonomous agents)
+
+- `TriageStatusGuided`
+- `TriageListGuided`
+- `TriageInspectGuided`
+
+Guided tool responses include:
+
+- `llm_directive` for markdown pass-through behavior
+- `next_step` metadata for deterministic tool chaining
+- `pause` metadata to force user-input checkpoints
+
+### MCP prompts
+
+- `SarifintownForceCheck`
+- `SarifintownInspectFinding`
 
 Triage decisions are persisted to `<workspace>/.sarif/triage.json`.
 

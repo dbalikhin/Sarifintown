@@ -29,6 +29,127 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        [TestCase("true positive", "TP")]
+        [TestCase("false positive", "FP")]
+        public async Task Triage_WithNaturalLanguageState_MapsToExpectedState(string inputState, string expectedState)
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "triage-state-alias.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-ALIAS",
+                      "level": "error",
+                      "message": { "text": "Alias test" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/a.cs" },
+                            "region": { "startLine": 7 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 1);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
+
+                var triageJson = await SarifTools.Triage(findingId!, inputState, "confirmed", "AI");
+                var triagePayload = JsonSerializer.Deserialize<JsonElement>(triageJson);
+
+                Assert.That(triagePayload.GetProperty("State").GetString(), Is.EqualTo(expectedState));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task ExtractCodeFlow_WhenSourceRootIsOneLevelAboveProject_ResolvesSnippet()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            var projectRoot = Path.Combine(workspace, "SharpSaster");
+            var controllerDirectory = Path.Combine(projectRoot, "Controllers");
+
+            Directory.CreateDirectory(sarifDirectory);
+            Directory.CreateDirectory(controllerDirectory);
+
+            var sourcePath = Path.Combine(controllerDirectory, "SqlAdvancedController.cs");
+            File.WriteAllText(sourcePath, "class SqlAdvancedController { void Run() { } }");
+
+            var sarifPath = Path.Combine(sarifDirectory, "results.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "csharp/Sqli",
+                      "codeFlows": [
+                        {
+                          "threadFlows": [
+                            {
+                              "locations": [
+                                {
+                                  "location": {
+                                    "physicalLocation": {
+                                      "artifactLocation": {
+                                        "uri": "Controllers/SqlAdvancedController.cs"
+                                      },
+                                      "region": {
+                                        "startLine": 1,
+                                        "endLine": 1
+                                      }
+                                    },
+                                    "message": {
+                                      "text": "Step 1"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            try
+            {
+                var result = await SarifTools.ExtractCodeFlow(sarifPath, "0", workspace);
+
+                Assert.That(result, Contains.Substring("SqlAdvancedController.cs"));
+                Assert.That(result, Contains.Substring("extracted_code_snippet"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
         [Test]
         public async Task TriageInspect_WithLineWindowConcatenated_MergesNearbySteps()
         {
@@ -642,6 +763,138 @@ namespace Sarifintown.AgentEngine.Tests
             finally
             {
                 File.Delete(outputPath);
+            }
+        }
+
+        [Test]
+        public async Task TriageStatusGuided_ReturnsDirectiveAndNextStepMetadata()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-status.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-GUIDED",
+                      "level": "warning",
+                      "message": { "text": "Guided status" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageStatusGuided();
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("protocol").GetString(), Is.EqualTo("sarifintown.guided.v1"));
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("pause").GetProperty("required").GetBoolean(), Is.True);
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task TriageListGuided_ReturnsTableAndInspectNextStep()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-list.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-LIST",
+                      "level": "error",
+                      "message": { "text": "Guided list" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/list.cs" },
+                            "region": { "startLine": 12 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageListGuided(limit: 5);
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageInspectGuided"));
+                Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("| FindingId | Severity | State | Rule | Location |"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task TriageInspectGuided_WithUnknownFinding_ReturnsListRecoveryStep()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-inspect.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-INSPECT",
+                      "level": "warning",
+                      "message": { "text": "Guided inspect" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.TriageInspectGuided("missing-id");
+                var payload = JsonSerializer.Deserialize<JsonElement>(result);
+
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("Finding Not Found"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
             }
         }
 

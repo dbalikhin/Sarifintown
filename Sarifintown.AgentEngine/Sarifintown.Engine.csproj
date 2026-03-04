@@ -14,7 +14,6 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.ClearScript.Complete" Version="7.5.0" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.3" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.3" />
     <PackageReference Include="ModelContextProtocol" Version="1.0.0" />
     <PackageReference Include="Spectre.Console" Version="0.54.0" />
   </ItemGroup>

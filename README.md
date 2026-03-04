@@ -54,6 +54,19 @@ MCP server support is available via `Sarifintown.Engine`; see the concise setup 
 - `Triage`
 - `TriageBulk`
 
+Guided/chained variants for autonomous clients:
+
+- `TriageStatusGuided`
+- `TriageListGuided`
+- `TriageInspectGuided`
+
+Guided responses include a strict markdown rendering directive, explicit `next_step` tool metadata, and a required user-input pause.
+
+MCP prompt primitives are also exposed:
+
+- `SarifintownForceCheck`
+- `SarifintownInspectFinding`
+
 These commands use loaded SARIF findings and persist decision state to `.sarif/triage.json`.
 
 ## License

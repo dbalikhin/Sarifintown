@@ -128,6 +128,88 @@ namespace Sarifintown.Helpers
             return string.Join('/', segments.Skip(workspaceIndex + 1));
         }
 
+        /// <summary>
+        /// Resolves the physical file path for a SARIF artifact using workspace-root-aware rebasing and folder-adjust heuristics.
+        /// </summary>
+        public static string ResolvePathForWorkspace(
+            PhysicalLocation.PhysicalLocationArtifactLocation artifactLocation,
+            Run run,
+            string workspaceRoot)
+        {
+            ArgumentNullException.ThrowIfNull(run);
+
+            var normalized = ResolveArtifactPath(artifactLocation, run);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                normalized = NormalizePath(artifactLocation?.Uri ?? string.Empty);
+            }
+
+            return ResolvePathForWorkspace(normalized, workspaceRoot);
+        }
+
+        /// <summary>
+        /// Resolves a normalized SARIF path to an existing file within the workspace using consistent rebasing logic.
+        /// </summary>
+        public static string ResolvePathForWorkspace(string normalizedSarifPath, string workspaceRoot)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedSarifPath))
+            {
+                return string.Empty;
+            }
+
+            var normalized = NormalizePath(normalizedSarifPath);
+            if (Path.IsPathRooted(normalized) && File.Exists(normalized))
+            {
+                return Path.GetFullPath(normalized);
+            }
+
+            if (string.IsNullOrWhiteSpace(workspaceRoot))
+            {
+                return normalized;
+            }
+
+            var root = Path.GetFullPath(workspaceRoot);
+            if (!Directory.Exists(root))
+            {
+                return normalized;
+            }
+
+            var workspaceName = new DirectoryInfo(Path.TrimEndingDirectorySeparator(root)).Name;
+            var relativeCandidates = new List<string>();
+
+            AddRelativeCandidate(relativeCandidates, normalized);
+            AddRelativeCandidate(relativeCandidates, RebaseToWorkspaceRelativePath(normalized, workspaceName));
+            AddRelativeCandidate(relativeCandidates, TryAdjustPathToWorkspaceRoot(normalized, root, workspaceName));
+
+            var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            for (var skip = 1; skip <= Math.Min(2, segments.Length - 1); skip++)
+            {
+                AddRelativeCandidate(relativeCandidates, string.Join('/', segments.Skip(skip)));
+            }
+
+            foreach (var candidate in relativeCandidates)
+            {
+                var direct = Path.Combine(root, candidate.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(direct))
+                {
+                    return Path.GetFullPath(direct);
+                }
+
+                foreach (var childDirectory in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
+                {
+                    var nested = Path.Combine(childDirectory, candidate.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(nested))
+                    {
+                        return Path.GetFullPath(nested);
+                    }
+                }
+            }
+
+            return relativeCandidates.Count == 0
+                ? normalized
+                : Path.Combine(root, relativeCandidates[0].Replace('/', Path.DirectorySeparatorChar));
+        }
+
         public static (string adjustedPath, DirectoryPicker matchedFolder) AdjustPathToGrantedFolder(
             string normalizedSarifPath,
             IEnumerable<DirectoryPicker> accessibleFolders,
@@ -159,6 +241,11 @@ namespace Sarifintown.Helpers
                     .Select(segs => segs[1])
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
+
+                var inferredScannerRootCandidates = immediateChildren
+                    .Where(child => !string.IsNullOrWhiteSpace(child))
+                    .Where(child => !child.StartsWith(".", StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
 
                 // Case: "parent/child" → just "child"
                 if (pathSegments.Length >= 2 &&
@@ -212,6 +299,16 @@ namespace Sarifintown.Helpers
                     int bonus = flex.MatchedLength * 10 + flex.SubdirDepth;
                     AddCandidate(ref best, adjusted, folder, MatchTier.Flexible, bonus);
                 }
+
+                // Case: SARIF paths relative to scanner root (for example "Pages/Error.cshtml.cs")
+                if (inferredScannerRootCandidates.Length == 1
+                    && pathSegments.Length > 0
+                    && !pathSegments[0].Equals(name, StringComparison.OrdinalIgnoreCase)
+                    && !pathSegments[0].Equals(inferredScannerRootCandidates[0], StringComparison.OrdinalIgnoreCase))
+                {
+                    var inferredAdjusted = $"{inferredScannerRootCandidates[0]}/{string.Join("/", pathSegments)}";
+                    AddCandidate(ref best, inferredAdjusted, folder, MatchTier.Flexible, bonus: 1);
+                }
             }
 
             if (best != null)
@@ -257,6 +354,52 @@ namespace Sarifintown.Helpers
                     return i;
             }
             return -1;
+        }
+
+        private static void AddRelativeCandidate(List<string> candidates, string candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                return;
+            }
+
+            var normalized = NormalizePath(candidate).TrimStart('/');
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return;
+            }
+
+            if (Path.IsPathRooted(normalized))
+            {
+                return;
+            }
+
+            if (!candidates.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            {
+                candidates.Add(normalized);
+            }
+        }
+
+        private static string TryAdjustPathToWorkspaceRoot(string normalizedPath, string workspaceRoot, string workspaceName)
+        {
+            var topLevelSubdirectories = Directory
+                .EnumerateDirectories(workspaceRoot, "*", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => $"{workspaceName}/{name}")
+                .ToList();
+
+            topLevelSubdirectories.Add($"{workspaceName}/.sarif");
+
+            var picker = new DirectoryPicker
+            {
+                Id = 0,
+                Name = workspaceName,
+                Subdirectories = topLevelSubdirectories
+            };
+
+            var (adjustedPath, _) = AdjustPathToGrantedFolder(normalizedPath, new[] { picker }, out _);
+            return adjustedPath;
         }
 
         private static string ResolveBasePathFromOriginalUriBaseIds(UriBaseId baseInfo, IDictionary<string, UriBaseId> allBaseIds)
