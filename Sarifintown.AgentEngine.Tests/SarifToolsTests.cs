@@ -1,3 +1,5 @@
+using ModelContextProtocol.Server;
+using ModelContextProtocol.Protocol;
 using NUnit.Framework;
 using Sarifintown.AgentEngine;
 using Sarifintown.Core;
@@ -64,6 +66,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             SarifTools.SetWorkspaceRoot(workspace);
             SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SarifTools.SetLocalUiBaseUrl("http://127.0.0.1:54321");
 
             try
             {
@@ -799,7 +802,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var payload = JsonSerializer.Deserialize<JsonElement>(result);
 
                 Assert.That(payload.GetProperty("protocol").GetString(), Is.EqualTo("sarifintown.guided.v1"));
-                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("manage_triage"));
                 Assert.That(payload.GetProperty("pause").GetProperty("required").GetBoolean(), Is.True);
             }
             finally
@@ -848,7 +851,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var result = await SarifTools.TriageListGuided(limit: 5);
                 var payload = JsonSerializer.Deserialize<JsonElement>(result);
 
-                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageInspectGuided"));
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("manage_triage"));
                 Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("| FindingId | Severity | State | Rule | Location |"));
             }
             finally
@@ -889,7 +892,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var result = await SarifTools.TriageInspectGuided("missing-id");
                 var payload = JsonSerializer.Deserialize<JsonElement>(result);
 
-                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("TriageListGuided"));
+                Assert.That(payload.GetProperty("next_step").GetProperty("tool").GetString(), Is.EqualTo("manage_triage"));
                 Assert.That(payload.GetProperty("markdown").GetString(), Contains.Substring("Finding Not Found"));
             }
             finally
@@ -1005,6 +1008,98 @@ namespace Sarifintown.AgentEngine.Tests
 
             // Assert
             Assert.That(payload.GetProperty("fallback_used").GetBoolean(), Is.True);
+        }
+
+        [Test]
+        public async Task ManageTriage_WithGuidedStatusAction_ReturnsGuidedPayload()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "guided-facade.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-FACADE",
+                      "level": "warning",
+                      "message": { "text": "facade" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.manage_triage("status", filters: "{\"guided\":true}");
+                Assert.That(result.Content, Is.Not.Null);
+                Assert.That(result.Content.Count, Is.EqualTo(1));
+
+                var textBlock = result.Content[0] as TextContentBlock;
+                Assert.That(textBlock, Is.Not.Null);
+                Assert.That(textBlock!.Text, Contains.Substring("[INSTRUCTIONS FOR LLM]"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public void BuildUiResourceUri_WithDynamicLocalUiBaseUrl_UsesAssignedPort()
+        {
+            SarifTools.SetLocalUiBaseUrl("http://127.0.0.1:54321");
+
+            var method = typeof(SarifTools)
+                .GetMethod("BuildUiResourceUri", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+
+            var value = method!.Invoke(null, new object[] { "triage", "status", string.Empty }) as string;
+
+            Assert.That(value, Does.StartWith("http://127.0.0.1:54321/"));
+        }
+
+        [Test]
+        public async Task AnalyzeSarif_WithListFilesAction_ReturnsDiscoveredFiles()
+        {
+            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            Directory.CreateDirectory(tempDirectory);
+            var fileOne = Path.Combine(tempDirectory, "x.sarif");
+            File.WriteAllText(fileOne, "{}");
+            SarifTools.SetDiscoveredSarifFiles(new[] { fileOne });
+
+            try
+            {
+                var result = await SarifTools.analyze_sarif("list_files");
+                var textBlock = result.Content[0] as TextContentBlock;
+
+                Assert.That(textBlock, Is.Not.Null);
+                Assert.That(textBlock!.Text, Contains.Substring("x.sarif"));
+            }
+            finally
+            {
+                Directory.Delete(tempDirectory, true);
+            }
+        }
+
+        [Test]
+        public void McpToolExposure_IsLimitedToFacadeTools()
+        {
+            var toolMethods = typeof(SarifTools)
+                .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                .Where(method => method.GetCustomAttributes(typeof(McpServerToolAttribute), inherit: false).Length > 0)
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .ToList();
+
+            Assert.That(toolMethods, Is.EqualTo(new[] { "analyze_sarif", "manage_triage" }));
         }
     }
 }

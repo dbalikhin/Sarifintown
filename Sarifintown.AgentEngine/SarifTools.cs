@@ -1,10 +1,13 @@
 ﻿using ModelContextProtocol.Server;
+using ModelContextProtocol.Protocol;
 using Sarifintown.Core;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using SarifResult = Sarifintown.Models.Result;
 
 namespace Sarifintown.AgentEngine
 {
@@ -112,7 +115,126 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("MUST: Call this tool first to enumerate SARIF files discovered at server startup before any SARIF-path-dependent operation.")]
+        [Description("MUST: Use this facade for all triage workflows. Set action to one of: status, list, inspect, decide, or bulk_decide.")]
+        public static async Task<CallToolResult> manage_triage(
+            [Description("Routing action: status, list, inspect, decide, or bulk_decide.")]
+            string action,
+            [Description("Finding identifier. Required for inspect and decide actions.")]
+            string findingId = "",
+            [Description("Decision state TP/FP. Required for decide and bulk_decide actions.")]
+            string state = "",
+            [Description("Decision reason. Required for decide and bulk_decide actions.")]
+            string reason = "",
+            [Description("Optional JSON object for filters and options (severity, rule, file, limit, guided, dryRun, evidenceMode, author).")]
+            string filters = "",
+            [Description("Execution mode: interactive or agentic. Interactive pauses for user input; agentic enforces autonomous next-step chaining.")]
+            string mode = "interactive")
+        {
+            await Task.CompletedTask.ConfigureAwait(false);
+
+            var normalizedMode = mode?.Trim().ToLowerInvariant();
+
+            bool isTaskComplete =
+                string.Equals(normalizedMode, "agentic", StringComparison.Ordinal) &&
+                string.Equals(action?.Trim(), "bulk_decide_complete", StringComparison.OrdinalIgnoreCase);
+
+            string llmInstructions;
+            if (string.Equals(normalizedMode, "interactive", StringComparison.Ordinal))
+            {
+                llmInstructions = """
+                You must render the markdown content exactly as provided.
+                You must PAUSE after rendering and wait for explicit user input.
+                Do not execute any additional tools after rendering.
+                """;
+            }
+            else if (string.Equals(normalizedMode, "agentic", StringComparison.Ordinal) && isTaskComplete)
+            {
+                llmInstructions = """
+                Hard stop condition reached.
+                Output the exact phrase "**Bulk Triage Complete.**".
+                STOP GENERATING immediately after that phrase.
+                Make ZERO further tool calls.
+                """;
+            }
+            else
+            {
+                llmInstructions = """
+                You are in boxed-in agentic mode. These directives override your internal plan.
+                Do not use generic tools such as bash, python, or read_file.
+                Do not substitute any other tools for triage execution.
+                Your NEXT STEP must be to immediately call `manage_triage` again to process the next item.
+                """;
+            }
+
+            var markdownPayload = $"""
+            ## Triage Control Envelope
+
+            - Action: `{action}`
+            - FindingId: `{findingId}`
+            - State: `{state}`
+            - Reason: `{reason}`
+            - Filters: `{filters}`
+            - Mode: `{normalizedMode}`
+
+            > Dummy payload: this block intentionally simulates backend triage state.
+            """;
+
+            var combinedMarkdown = $"""
+            [INSTRUCTIONS FOR LLM]
+            {llmInstructions}
+
+            [CONTENT]
+            {markdownPayload}
+            """;
+
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock
+                    {
+                        Text = combinedMarkdown
+                    }
+                }
+            };
+        }
+
+        [McpServerTool]
+        [Description("MUST: Use this facade for SARIF discovery, filtering, code-flow extraction, and report generation. Set action to list_files, filter, extract_flow, or generate_report.")]
+        public static async Task<CallToolResult> analyze_sarif(
+            [Description("Routing action: list_files, filter, extract_flow, or generate_report.")]
+            string action,
+            [Description("SARIF file path or discovered filename. Required for filter and extract_flow actions.")]
+            string sarifPath = "",
+            [Description("Result identifier. Required for extract_flow and generate_report actions.")]
+            string resultId = "",
+            [Description("Optional JSON object for filters/options (severity, ruleId, category, sourceCodeRoot, outputPath, extractedFlowData).")]
+            string filters = "")
+        {
+            var options = ParseFacadeFilters(filters);
+            var normalizedAction = action?.Trim().ToLowerInvariant();
+
+            var payload = normalizedAction switch
+            {
+                "list_files" => ListWorkspaceSarifFiles(),
+                "filter" => await LoadAndFilterSarif(sarifPath, options.Severity, options.RuleId, options.Category),
+                "extract_flow" => await ExtractCodeFlow(
+                    sarifPath,
+                    resultId,
+                    string.IsNullOrWhiteSpace(options.SourceCodeRoot) ? GetWorkspaceRoot() : options.SourceCodeRoot),
+                "generate_report" => GenerateAnalysisReport(resultId, options.ExtractedFlowData, options.OutputPath),
+                _ => throw new ArgumentException($"Unsupported analysis action: {action}", nameof(action))
+            };
+
+            return CreateDualPurposeResult(
+                workflow: "analyze_sarif",
+                action: normalizedAction ?? string.Empty,
+                payload: payload,
+                resourceUri: BuildUiResourceUri("analysis", normalizedAction ?? string.Empty, resultId),
+                nextActionHint: "Type your next command (for example: `analyze_sarif extract_flow`).");
+        }
+
+        [Description("MUST: Call this helper to enumerate SARIF files discovered at server startup before any SARIF-path-dependent operation.")]
         public static string ListWorkspaceSarifFiles()
         {
             List<string> files;
@@ -130,7 +252,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(payload);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to obtain authoritative triage posture from loaded SARIF findings and local .sarif/triage.json state.")]
         public static async Task<string> TriageStatus()
         {
@@ -139,7 +260,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(status);
         }
 
-        [McpServerTool]
         [Description("MUST: Start autonomous triage flow with this guided tool. Render markdown verbatim, then follow next_step; do not use terminal commands for SARIF-domain actions.")]
         public static async Task<string> TriageStatusGuided()
         {
@@ -162,13 +282,12 @@ namespace Sarifintown.AgentEngine
                 workflowName: "triage-status",
                 data: status,
                 markdown: markdown,
-                nextTool: "TriageListGuided",
-                nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
+                nextTool: "manage_triage",
+                nextToolArguments: new { action = "list", filters = "{\"guided\":true,\"limit\":10}" },
                 pauseForUserInput: true,
                 pausePrompt: "Reply with `list` to continue to prioritized findings.");
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to retrieve prioritized findings with filters; do not infer finding sets without calling it.")]
         public static async Task<string> TriageList(
             [Description("Optional severity filter (for example: High, Medium, Low).")]
@@ -187,7 +306,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(findings);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this guided listing tool for autonomous chaining; response includes enforced next_step and pause directives.")]
         public static async Task<string> TriageListGuided(
             [Description("Optional severity filter (for example: High, Medium, Low).")]
@@ -209,13 +327,12 @@ namespace Sarifintown.AgentEngine
                 workflowName: "triage-list",
                 data: findings,
                 markdown: markdown,
-                nextTool: "TriageInspectGuided",
-                nextToolArguments: new { findingId = "<reply-with-finding-id>", evidenceMode = "line-window-concatenated" },
+                nextTool: "manage_triage",
+                nextToolArguments: new { action = "inspect", findingId = "<reply-with-finding-id>", filters = "{\"guided\":true,\"evidenceMode\":\"line-window-concatenated\"}" },
                 pauseForUserInput: true,
                 pausePrompt: "Reply with a FindingId from the table to inspect technical evidence.");
         }
 
-        [McpServerTool]
         [Description("Use this query-named alias when the MCP client requires query-style tool naming; behavior matches TriageList.")]
         public static Task<string> TriageQuery(
             [Description("Optional severity filter.")]
@@ -232,7 +349,6 @@ namespace Sarifintown.AgentEngine
             return TriageList(severity, rule, file, state, limit);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool for authoritative technical evidence of one finding, including ordered data-flow and snippets.")]
         public static async Task<string> TriageInspect(
             [Description("Finding identifier returned by TriageList or TriageListGuided.")]
@@ -255,7 +371,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(inspect);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this guided inspection tool in autonomous workflows. Render markdown verbatim and execute explicit next_step triage action.")]
         public static async Task<string> TriageInspectGuided(
             [Description("Finding identifier returned by guided list output.")]
@@ -280,8 +395,8 @@ namespace Sarifintown.AgentEngine
                     workflowName: "triage-inspect",
                     data: new { success = false, message = $"Finding not found: {findingId}" },
                     markdown: notFoundMarkdown,
-                    nextTool: "TriageListGuided",
-                    nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
+                    nextTool: "manage_triage",
+                    nextToolArguments: new { action = "list", filters = "{\"guided\":true,\"limit\":10}" },
                     pauseForUserInput: true,
                     pausePrompt: "Reply with `list` to load findings, then provide a valid FindingId.");
             }
@@ -291,13 +406,12 @@ namespace Sarifintown.AgentEngine
                 workflowName: "triage-inspect",
                 data: inspect,
                 markdown: markdown,
-                nextTool: "Triage",
-                nextToolArguments: new { findingId = inspect.FindingId, state = "TP|FP", reason = "<required>", author = "AI" },
+                nextTool: "manage_triage",
+                nextToolArguments: new { action = "decide", findingId = inspect.FindingId, state = "TP|FP", reason = "<required>", filters = "{\"author\":\"AI\"}" },
                 pauseForUserInput: true,
                 pausePrompt: "Reply with `TP <reason>` or `FP <reason>` to record a triage decision.");
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to persist a TP/FP triage decision for one finding into .sarif/triage.json.")]
         public static async Task<string> Triage(
             [Description("Target finding identifier.")]
@@ -314,7 +428,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(result);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool for bulk TP/FP triage updates using filters. At least one of severity/rule/file is required.")]
         public static async Task<string> TriageBulk(
             [Description("Decision state to apply (TP or FP).")]
@@ -343,7 +456,6 @@ namespace Sarifintown.AgentEngine
             return JsonSerializer.Serialize(result);
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to resolve the correct interactive surface for the connected host before launching UI/TUI experiences.")]
         public static string ResolveInteractiveSurface(
             [Description("Active MCP server instance; used for host detection.")]
@@ -411,7 +523,6 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to parse a SARIF file and apply category/severity/rule filters. Do not infer filtered issues without this call.")]
         public static async Task<string> LoadAndFilterSarif(
             [Description("SARIF file path (absolute or filename discovered at startup).")]
@@ -438,7 +549,7 @@ namespace Sarifintown.AgentEngine
                 if (sarifLog?.Runs == null || !sarifLog.Runs.Any())
                     return JsonSerializer.Serialize(new { error = "Invalid or empty SARIF file." });
 
-                var results = sarifLog.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<Result>()).ToList();
+                var results = sarifLog.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<SarifResult>()).ToList();
 
                 // Apply Filters
                 if (!string.IsNullOrWhiteSpace(severity))
@@ -468,7 +579,6 @@ namespace Sarifintown.AgentEngine
             }
         }
 
-        [McpServerTool]
         [Description("MUST: Use this tool to extract source-to-sink data flow for a SARIF issue using Tree-sitter and fallback snippet windows.")]
         public static async Task<string> ExtractCodeFlow(
             [Description("SARIF file path (absolute or filename discovered at startup).")]
@@ -491,7 +601,7 @@ namespace Sarifintown.AgentEngine
                 var content = await FileReader.ReadFileAsync(resolvedSarifPath);
                 var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 var flattenedResults = sarifLog?.Runs
-                    .SelectMany(run => (run.Results ?? Enumerable.Empty<Result>()).Select(result => (run, result)))
+                    .SelectMany(run => (run.Results ?? Enumerable.Empty<SarifResult>()).Select(result => (run, result)))
                     .ToList();
 
                 if (flattenedResults == null || !int.TryParse(resultId, out int index) || index < 0 || index >= flattenedResults.Count)
@@ -635,6 +745,137 @@ namespace Sarifintown.AgentEngine
             }
 
             return sarifPath;
+        }
+
+        private static FacadeFilterOptions ParseFacadeFilters(string filters)
+        {
+            if (string.IsNullOrWhiteSpace(filters))
+            {
+                return new FacadeFilterOptions();
+            }
+
+            try
+            {
+                var parsed = JsonSerializer.Deserialize<FacadeFilterOptions>(filters, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                return parsed ?? new FacadeFilterOptions();
+            }
+            catch (JsonException ex)
+            {
+                throw new ArgumentException("Filters must be a valid JSON object.", nameof(filters), ex);
+            }
+        }
+
+        private static string GetWorkspaceRoot()
+        {
+            lock (SyncRoot)
+            {
+                return _workspaceRoot;
+            }
+        }
+
+        private static CallToolResult CreateDualPurposeResult(
+            string workflow,
+            string action,
+            string payload,
+            string resourceUri,
+            string nextActionHint)
+        {
+            var markdown = BuildPassThroughMarkdown(workflow, action, payload, nextActionHint);
+            if (string.IsNullOrWhiteSpace(resourceUri))
+            {
+                string localUiBaseUrl;
+                lock (SyncRoot)
+                {
+                    localUiBaseUrl = _localUiBaseUrl;
+                }
+
+                if (Uri.TryCreate(localUiBaseUrl, UriKind.Absolute, out var baseUri))
+                {
+                    var builder = new UriBuilder(baseUri)
+                    {
+                        Path = "mcp/dashboard"
+                    };
+
+                    resourceUri = builder.Uri.ToString();
+                }
+            }
+
+            var meta = new JsonObject();
+            if (!string.IsNullOrWhiteSpace(resourceUri))
+            {
+                var csp = BuildUiCsp(resourceUri);
+                meta["ui"] = new JsonObject
+                {
+                    ["resourceUri"] = resourceUri,
+                    ["csp"] = csp
+                };
+            }
+
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock
+                    {
+                        Text = markdown
+                    }
+                },
+                Meta = meta
+            };
+        }
+
+        private static string BuildPassThroughMarkdown(string workflow, string action, string payload, string nextActionHint)
+        {
+            return $"""
+            [INSTRUCTIONS FOR LLM]
+            You are acting as a UI renderer. Output the exact Markdown in the [CONTENT] block verbatim.
+            Do NOT summarize it. After rendering, PAUSE and wait for the user to type the next command.
+
+            [CONTENT]
+            ### SARIF {workflow} {action}
+
+            ```json
+            {payload}
+            ```
+
+            **Next Action:** {nextActionHint}
+            """;
+        }
+
+        private static string BuildUiResourceUri(string routePrefix, string action, string id)
+        {
+            var localUi = CreateLocalHttpUiPayload();
+            var uri = GetPropertyValue(localUi, "uri")?.ToString();
+
+            if (!string.IsNullOrWhiteSpace(uri) && Uri.TryCreate(uri, UriKind.Absolute, out var baseUri))
+            {
+                var builder = new UriBuilder(baseUri)
+                {
+                    Path = $"mcp/{routePrefix}/{action}",
+                    Query = string.IsNullOrWhiteSpace(id)
+                        ? string.Empty
+                        : $"id={Uri.EscapeDataString(id)}"
+                };
+
+                return builder.Uri.ToString();
+            }
+
+            return string.Empty;
+        }
+
+        private static string BuildUiCsp(string resourceUri)
+        {
+            if (!Uri.TryCreate(resourceUri, UriKind.Absolute, out var absoluteUri))
+            {
+                return "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self';";
+            }
+
+            var origin = absoluteUri.GetLeftPart(UriPartial.Authority);
+            return $"default-src 'none'; script-src 'self' {origin}; style-src 'self' {origin}; connect-src 'self' {origin}; img-src 'self' data: {origin};";
         }
 
         private static string CreateGuidedResponse(
@@ -962,7 +1203,24 @@ namespace Sarifintown.AgentEngine
             return property.GetValue(instance);
         }
 
-        [McpServerTool]
+        private sealed class FacadeFilterOptions
+        {
+            public string Severity { get; init; } = string.Empty;
+            public string Rule { get; init; } = string.Empty;
+            public string RuleId { get; init; } = string.Empty;
+            public string File { get; init; } = string.Empty;
+            public string State { get; init; } = string.Empty;
+            public int Limit { get; init; } = 10;
+            public bool Guided { get; init; }
+            public bool DryRun { get; init; }
+            public string EvidenceMode { get; init; } = string.Empty;
+            public string Author { get; init; } = string.Empty;
+            public string Category { get; init; } = string.Empty;
+            public string SourceCodeRoot { get; init; } = string.Empty;
+            public string OutputPath { get; init; } = string.Empty;
+            public string ExtractedFlowData { get; init; } = string.Empty;
+        }
+
         [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
         public static string GenerateAnalysisReport(
             [Description("Result identifier for report metadata.")]
