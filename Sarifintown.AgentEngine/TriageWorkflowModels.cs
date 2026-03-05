@@ -85,6 +85,21 @@ internal sealed record TriageBulkResult(
     IReadOnlyList<string> ModifiedFindingIds,
     bool DryRun);
 
+internal sealed record TriageFindingEnvelope(
+    string FindingId,
+    Sarifintown.Models.Result Result,
+    Sarifintown.Models.Run Run,
+    string SarifPath,
+    string Severity,
+    TriageFindingState State,
+    string RuleName,
+    string FilePath,
+    int? LineNumber,
+    double PriorityScore,
+    string RuleCategory,
+    string RuleDescription,
+    string Remediation);
+
 internal sealed record TriageStateDocument
 {
     public int SchemaVersion { get; init; } = 1;

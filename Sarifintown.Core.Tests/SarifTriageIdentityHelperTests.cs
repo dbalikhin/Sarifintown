@@ -59,5 +59,24 @@ namespace Sarifintown.Core.Tests
             Assert.That(identity, Is.Not.Empty);
             Assert.That(identity.Length, Is.EqualTo(64));
         }
+
+        [Test]
+        public void BuildIdentity_WithDifferentToolNames_ReturnsDifferentIdentities()
+        {
+            var result = new Result
+            {
+                RuleId = "RULE001",
+                Message = new Result.ResultMessage { Text = "message" },
+                PartialFingerprints = new Dictionary<string, string>
+                {
+                    ["primaryLocationLineHash"] = "abc"
+                }
+            };
+
+            var codeQlIdentity = SarifTriageIdentityHelper.BuildIdentity(result, "CodeQL");
+            var eslintIdentity = SarifTriageIdentityHelper.BuildIdentity(result, "ESLint");
+
+            Assert.That(codeQlIdentity, Is.Not.EqualTo(eslintIdentity));
+        }
     }
 }

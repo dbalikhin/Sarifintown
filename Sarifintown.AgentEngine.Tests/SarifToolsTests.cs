@@ -4,7 +4,9 @@ using NUnit.Framework;
 using Sarifintown.AgentEngine;
 using Sarifintown.Core;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
+using System.Threading;
 
 namespace Sarifintown.AgentEngine.Tests
 {
@@ -28,6 +30,113 @@ namespace Sarifintown.AgentEngine.Tests
                     return File.ReadAllTextAsync(relativePath);
                 }
                 throw new FileNotFoundException($"File not found: {relativePath}");
+            }
+        }
+
+        [Test]
+        public async Task TriageList_WithLatestPerToolPreload_IncludesOnlyNewestFilePerTool()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var olderToolAPath = Path.Combine(sarifDirectory, "tool-a-older.sarif");
+            File.WriteAllText(olderToolAPath, """
+            {
+              "runs": [
+                {
+                  "tool": { "driver": { "name": "ToolA" } },
+                  "results": [
+                    {
+                      "ruleId": "RULE-OLD",
+                      "level": "warning",
+                      "message": { "text": "old" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/old.cs" },
+                            "region": { "startLine": 1 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            var latestToolAPath = Path.Combine(sarifDirectory, "tool-a-latest.sarif");
+            File.WriteAllText(latestToolAPath, """
+            {
+              "runs": [
+                {
+                  "tool": { "driver": { "name": "ToolA" } },
+                  "results": [
+                    {
+                      "ruleId": "RULE-NEW",
+                      "level": "error",
+                      "message": { "text": "new" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/new.cs" },
+                            "region": { "startLine": 2 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            var toolBPath = Path.Combine(sarifDirectory, "tool-b.sarif");
+            File.WriteAllText(toolBPath, """
+            {
+              "runs": [
+                {
+                  "tool": { "driver": { "name": "ToolB" } },
+                  "results": [
+                    {
+                      "ruleId": "RULE-B",
+                      "level": "warning",
+                      "message": { "text": "b" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/b.cs" },
+                            "region": { "startLine": 3 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            var baseline = DateTime.UtcNow;
+            File.SetLastWriteTimeUtc(olderToolAPath, baseline.AddMinutes(-5));
+            File.SetLastWriteTimeUtc(latestToolAPath, baseline.AddMinutes(-1));
+            File.SetLastWriteTimeUtc(toolBPath, baseline.AddMinutes(-2));
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { olderToolAPath, latestToolAPath, toolBPath });
+
+            try
+            {
+                var responseJson = await SarifTools.TriageList(limit: 10);
+                var payload = JsonSerializer.Deserialize<List<JsonElement>>(responseJson);
+                var ruleNames = payload!.Select(item => item.GetProperty("RuleName").GetString()).ToList();
+
+                Assert.That(ruleNames, Is.EqualTo(new[] { "RULE-NEW", "RULE-B" }));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
             }
         }
 
@@ -78,74 +187,6 @@ namespace Sarifintown.AgentEngine.Tests
                 var triagePayload = JsonSerializer.Deserialize<JsonElement>(triageJson);
 
                 Assert.That(triagePayload.GetProperty("State").GetString(), Is.EqualTo(expectedState));
-            }
-            finally
-            {
-                Directory.Delete(workspace, true);
-            }
-        }
-
-        [Test]
-        public async Task ExtractCodeFlow_WhenSourceRootIsOneLevelAboveProject_ResolvesSnippet()
-        {
-            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            var sarifDirectory = Path.Combine(workspace, ".sarif");
-            var projectRoot = Path.Combine(workspace, "SharpSaster");
-            var controllerDirectory = Path.Combine(projectRoot, "Controllers");
-
-            Directory.CreateDirectory(sarifDirectory);
-            Directory.CreateDirectory(controllerDirectory);
-
-            var sourcePath = Path.Combine(controllerDirectory, "SqlAdvancedController.cs");
-            File.WriteAllText(sourcePath, "class SqlAdvancedController { void Run() { } }");
-
-            var sarifPath = Path.Combine(sarifDirectory, "results.sarif");
-            File.WriteAllText(sarifPath, """
-            {
-              "runs": [
-                {
-                  "results": [
-                    {
-                      "ruleId": "csharp/Sqli",
-                      "codeFlows": [
-                        {
-                          "threadFlows": [
-                            {
-                              "locations": [
-                                {
-                                  "location": {
-                                    "physicalLocation": {
-                                      "artifactLocation": {
-                                        "uri": "Controllers/SqlAdvancedController.cs"
-                                      },
-                                      "region": {
-                                        "startLine": 1,
-                                        "endLine": 1
-                                      }
-                                    },
-                                    "message": {
-                                      "text": "Step 1"
-                                    }
-                                  }
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-            """);
-
-            try
-            {
-                var result = await SarifTools.ExtractCodeFlow(sarifPath, "0", workspace);
-
-                Assert.That(result, Contains.Substring("SqlAdvancedController.cs"));
-                Assert.That(result, Contains.Substring("extracted_code_snippet"));
             }
             finally
             {
@@ -294,10 +335,20 @@ namespace Sarifintown.AgentEngine.Tests
 
         private class FakeTreeSitterEngine : ITreeSitterEngine
         {
+            private static int _extractMethodCallCount;
+
+            public static int ExtractMethodCallCount => Volatile.Read(ref _extractMethodCallCount);
+
+            public static void Reset()
+            {
+                Interlocked.Exchange(ref _extractMethodCallCount, 0);
+            }
+
             public Task InitializeAsync() => Task.CompletedTask;
 
             public Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
             {
+                Interlocked.Increment(ref _extractMethodCallCount);
                 return Task.FromResult("extracted_code_snippet");
             }
         }
@@ -307,9 +358,84 @@ namespace Sarifintown.AgentEngine.Tests
         {
             SarifTools.FileReader = new FakeFileReader();
             SarifTools.TreeSitterEngine = new FakeTreeSitterEngine();
+            FakeTreeSitterEngine.Reset();
+            SetInternalSarifToolsProperty("StateService", null);
+            SetInternalSarifToolsProperty("SnippetCache", null);
+            SetInternalSarifToolsProperty("SnippetWarmupService", null);
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
             SarifTools.SetLocalUiBaseUrl(string.Empty);
             SarifTools.SetWorkspaceRoot(Directory.GetCurrentDirectory());
+        }
+
+        [Test]
+        public async Task TriageInspect_WithSharedSnippetCache_ReusesExtractedMethodAcrossCalls()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            var sourceDirectory = Path.Combine(workspace, "src");
+            Directory.CreateDirectory(sarifDirectory);
+            Directory.CreateDirectory(sourceDirectory);
+
+            var sourcePath = Path.Combine(sourceDirectory, "Cached.cs");
+            File.WriteAllText(sourcePath, "class Cached { void Run() { } }");
+
+            var sarifPath = Path.Combine(sarifDirectory, "cached-inspect.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-CACHED",
+                      "message": { "text": "flow" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Cached.cs" },
+                            "region": { "startLine": 1 }
+                          }
+                        }
+                      ],
+                      "codeFlows": [
+                        {
+                          "threadFlows": [
+                            {
+                              "locations": [
+                                { "location": { "physicalLocation": { "artifactLocation": { "uri": "src/Cached.cs" }, "region": { "startLine": 1, "endLine": 1 } } } }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("SnippetCache", CreateInternalTypeInstance("Sarifintown.AgentEngine.SnippetCacheService"));
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 1);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
+
+                var firstInspect = await SarifTools.TriageInspect(findingId!);
+                var secondInspect = await SarifTools.TriageInspect(findingId!);
+
+                Assert.That(firstInspect, Contains.Substring("extracted_code_snippet"));
+                Assert.That(secondInspect, Contains.Substring("extracted_code_snippet"));
+                Assert.That(FakeTreeSitterEngine.ExtractMethodCallCount, Is.EqualTo(1));
+            }
+            finally
+            {
+                SetInternalSarifToolsProperty("SnippetCache", null);
+                Directory.Delete(workspace, true);
+            }
         }
 
         [Test]
@@ -540,195 +666,6 @@ namespace Sarifintown.AgentEngine.Tests
             finally
             {
                 Directory.Delete(workspace, true);
-            }
-        }
-
-        [Test]
-        public async Task LoadAndFilterSarif_WithDiscoveredFileName_ResolvesAndParsesFile()
-        {
-            // Arrange
-            var sarifContent = @"
-            {
-                ""runs"": [
-                    {
-                        ""results"": [
-                            {
-                                ""ruleId"": ""RULE-DISCOVERED"",
-                                ""level"": ""warning"",
-                                ""message"": { ""text"": ""From discovered file"" }
-                            }
-                        ]
-                    }
-                ]
-            }";
-
-            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDirectory);
-            var tempFile = Path.Combine(tempDirectory, "scan.sarif");
-            File.WriteAllText(tempFile, sarifContent);
-            SarifTools.SetDiscoveredSarifFiles(new[] { tempFile });
-
-            try
-            {
-                // Act
-                var result = await SarifTools.LoadAndFilterSarif("scan.sarif");
-
-                // Assert
-                Assert.That(result, Contains.Substring("RULE-DISCOVERED"));
-            }
-            finally
-            {
-                Directory.Delete(tempDirectory, true);
-            }
-        }
-
-        [Test]
-        public void ListWorkspaceSarifFiles_WithDiscoveredFiles_ReturnsSerializedList()
-        {
-            // Arrange
-            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDirectory);
-            var fileOne = Path.Combine(tempDirectory, "a.sarif");
-            var fileTwo = Path.Combine(tempDirectory, "b.sarif");
-            File.WriteAllText(fileOne, "{}");
-            File.WriteAllText(fileTwo, "{}");
-            SarifTools.SetDiscoveredSarifFiles(new[] { fileOne, fileTwo });
-
-            try
-            {
-                // Act
-                var json = SarifTools.ListWorkspaceSarifFiles();
-                var parsed = JsonSerializer.Deserialize<List<JsonElement>>(json);
-
-                // Assert
-                Assert.That(parsed, Is.Not.Null);
-                Assert.That(parsed!.Count, Is.EqualTo(2));
-            }
-            finally
-            {
-                Directory.Delete(tempDirectory, true);
-            }
-        }
-
-        [Test]
-        public async Task LoadAndFilterSarif_WhenFileDoesNotExist_ReturnsError()
-        {
-            // Arrange
-            var path = "nonexistent.sarif";
-
-            // Act
-            var result = await SarifTools.LoadAndFilterSarif(path);
-
-            // Assert
-            Assert.That(result, Contains.Substring("File not found"));
-        }
-
-        [Test]
-        public async Task LoadAndFilterSarif_WithValidSarif_ReturnsFilteredResults()
-        {
-            // Arrange
-            var sarifContent = @"
-            {
-                ""runs"": [
-                    {
-                        ""results"": [
-                            {
-                                ""ruleId"": ""RULE001"",
-                                ""level"": ""error"",
-                                ""message"": { ""text"": ""Test error"" }
-                            },
-                            {
-                                ""ruleId"": ""RULE002"",
-                                ""level"": ""warning"",
-                                ""message"": { ""text"": ""Test warning"" }
-                            }
-                        ]
-                    }
-                ]
-            }";
-
-            var tempFile = Path.GetTempFileName();
-            File.WriteAllText(tempFile, sarifContent);
-
-            try
-            {
-                // Act
-                var result = await SarifTools.LoadAndFilterSarif(tempFile, severity: "error");
-
-                // Assert
-                Assert.That(result, Contains.Substring("RULE001"));
-                Assert.That(result, Does.Not.Contain("RULE002"));
-            }
-            finally
-            {
-                File.Delete(tempFile);
-            }
-        }
-
-        [Test]
-        public async Task ExtractCodeFlow_WithValidData_ReturnsFlowSteps()
-        {
-            // Arrange
-            var sarifContent = @"
-            {
-                ""runs"": [
-                    {
-                        ""results"": [
-                            {
-                                ""ruleId"": ""RULE001"",
-                                ""codeFlows"": [
-                                    {
-                                        ""threadFlows"": [
-                                            {
-                                                ""locations"": [
-                                                    {
-                                                        ""location"": {
-                                                            ""physicalLocation"": {
-                                                                ""artifactLocation"": {
-                                                                    ""uri"": ""test.cs""
-                                                                },
-                                                                ""region"": {
-                                                                    ""startLine"": 10
-                                                                }
-                                                            },
-                                                            ""message"": {
-                                                                ""text"": ""Step 1""
-                                                            }
-                                                        }
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            }";
-
-            var tempSarifFile = Path.GetTempFileName();
-            File.WriteAllText(tempSarifFile, sarifContent);
-
-            var tempSourceDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempSourceDir);
-            var tempSourceFile = Path.Combine(tempSourceDir, "test.cs");
-            File.WriteAllText(tempSourceFile, "var x = 1;\nvar y = 2;\nvar z = 3;");
-
-            try
-            {
-                // Act
-                var result = await SarifTools.ExtractCodeFlow(tempSarifFile, "0", tempSourceDir);
-
-                // Assert
-                Assert.That(result, Contains.Substring("RULE001"));
-                Assert.That(result, Contains.Substring("test.cs"));
-                Assert.That(result, Contains.Substring("extracted_code_snippet"));
-            }
-            finally
-            {
-                File.Delete(tempSarifFile);
-                Directory.Delete(tempSourceDir, true);
             }
         }
 
@@ -1054,6 +991,111 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
+        public async Task ManageTriage_WithStatusAction_ReturnsRealPayloadWithoutDummyContent()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "status-facade.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-STATUS",
+                      "level": "warning",
+                      "message": { "text": "status" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.manage_triage("status");
+                var textBlock = result.Content[0] as TextContentBlock;
+
+                Assert.That(textBlock, Is.Not.Null);
+                Assert.That(textBlock!.Text, Does.Not.Contain("Dummy payload"));
+                Assert.That(textBlock.Text, Contains.Substring("TotalFindings"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task ManageTriage_WithSqlIssuesAction_FiltersToSqlRelatedRules()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sql-issues.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "csharp/Sqli",
+                      "level": "error",
+                      "message": { "text": "SQL injection" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Api.cs" },
+                            "region": { "startLine": 12 }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "ruleId": "CA1031",
+                      "level": "warning",
+                      "message": { "text": "catch all" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Api.cs" },
+                            "region": { "startLine": 20 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.manage_triage("sql_issues", filters: "{\"limit\":10}");
+                var textBlock = result.Content[0] as TextContentBlock;
+
+                Assert.That(textBlock, Is.Not.Null);
+                Assert.That(textBlock!.Text, Contains.Substring("csharp/Sqli"));
+                Assert.That(textBlock.Text, Does.Not.Contain("CA1031"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
         public void BuildUiResourceUri_WithDynamicLocalUiBaseUrl_UsesAssignedPort()
         {
             SarifTools.SetLocalUiBaseUrl("http://127.0.0.1:54321");
@@ -1067,29 +1109,6 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task AnalyzeSarif_WithListFilesAction_ReturnsDiscoveredFiles()
-        {
-            var tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDirectory);
-            var fileOne = Path.Combine(tempDirectory, "x.sarif");
-            File.WriteAllText(fileOne, "{}");
-            SarifTools.SetDiscoveredSarifFiles(new[] { fileOne });
-
-            try
-            {
-                var result = await SarifTools.analyze_sarif("list_files");
-                var textBlock = result.Content[0] as TextContentBlock;
-
-                Assert.That(textBlock, Is.Not.Null);
-                Assert.That(textBlock!.Text, Contains.Substring("x.sarif"));
-            }
-            finally
-            {
-                Directory.Delete(tempDirectory, true);
-            }
-        }
-
-        [Test]
         public void McpToolExposure_IsLimitedToFacadeTools()
         {
             var toolMethods = typeof(SarifTools)
@@ -1099,7 +1118,19 @@ namespace Sarifintown.AgentEngine.Tests
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToList();
 
-            Assert.That(toolMethods, Is.EqualTo(new[] { "analyze_sarif", "manage_triage" }));
+            Assert.That(toolMethods, Is.EqualTo(new[] { "manage_triage" }));
+        }
+
+        private static object CreateInternalTypeInstance(string typeName)
+        {
+            var type = typeof(SarifTools).Assembly.GetType(typeName, throwOnError: true)!;
+            return Activator.CreateInstance(type)!;
+        }
+
+        private static void SetInternalSarifToolsProperty(string propertyName, object? value)
+        {
+            var property = typeof(SarifTools).GetProperty(propertyName, BindingFlags.Static | BindingFlags.NonPublic);
+            property!.SetValue(null, value);
         }
     }
 }

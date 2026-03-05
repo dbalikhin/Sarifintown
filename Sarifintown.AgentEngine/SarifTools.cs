@@ -1,13 +1,14 @@
 ﻿using ModelContextProtocol.Server;
 using ModelContextProtocol.Protocol;
+using Microsoft.Extensions.Options;
 using Sarifintown.Core;
+using Sarifintown.AgentEngine.Configuration;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using SarifResult = Sarifintown.Models.Result;
 
 namespace Sarifintown.AgentEngine
 {
@@ -17,6 +18,9 @@ namespace Sarifintown.AgentEngine
         // Dependencies to be injected at startup in Program.cs
         public static IFileReader? FileReader { get; set; }
         public static ITreeSitterEngine? TreeSitterEngine { get; set; }
+        internal static SarifStateService? StateService { get; set; }
+        internal static SnippetCacheService? SnippetCache { get; set; }
+        internal static SnippetWarmupService? SnippetWarmupService { get; set; }
         private static readonly object SyncRoot = new();
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
@@ -130,126 +134,124 @@ namespace Sarifintown.AgentEngine
             [Description("Execution mode: interactive or agentic. Interactive pauses for user input; agentic enforces autonomous next-step chaining.")]
             string mode = "interactive")
         {
-            await Task.CompletedTask.ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                throw new ArgumentException("Action is required.", nameof(action));
+            }
 
+            var filterOptions = ParseFacadeFilters(filters);
+            var normalizedAction = action.Trim().ToLowerInvariant();
             var normalizedMode = mode?.Trim().ToLowerInvariant();
+            var useGuidedFlow = filterOptions.Guided || string.Equals(normalizedMode, "agentic", StringComparison.Ordinal);
+            var author = string.IsNullOrWhiteSpace(filterOptions.Author) ? "AI" : filterOptions.Author;
+            var ruleFilter = string.IsNullOrWhiteSpace(filterOptions.Rule) ? filterOptions.RuleId : filterOptions.Rule;
 
-            bool isTaskComplete =
-                string.Equals(normalizedMode, "agentic", StringComparison.Ordinal) &&
-                string.Equals(action?.Trim(), "bulk_decide_complete", StringComparison.OrdinalIgnoreCase);
-
-            string llmInstructions;
-            if (string.Equals(normalizedMode, "interactive", StringComparison.Ordinal))
+            if ((normalizedAction is "sql_issues" or "sqlissues" or "sqli") && string.IsNullOrWhiteSpace(ruleFilter))
             {
-                llmInstructions = """
-                You must render the markdown content exactly as provided.
-                You must PAUSE after rendering and wait for explicit user input.
-                Do not execute any additional tools after rendering.
-                """;
-            }
-            else if (string.Equals(normalizedMode, "agentic", StringComparison.Ordinal) && isTaskComplete)
-            {
-                llmInstructions = """
-                Hard stop condition reached.
-                Output the exact phrase "**Bulk Triage Complete.**".
-                STOP GENERATING immediately after that phrase.
-                Make ZERO further tool calls.
-                """;
-            }
-            else
-            {
-                llmInstructions = """
-                You are in boxed-in agentic mode. These directives override your internal plan.
-                Do not use generic tools such as bash, python, or read_file.
-                Do not substitute any other tools for triage execution.
-                Your NEXT STEP must be to immediately call `manage_triage` again to process the next item.
-                """;
+                ruleFilter = "sqli";
             }
 
-            var markdownPayload = $"""
-            ## Triage Control Envelope
-
-            - Action: `{action}`
-            - FindingId: `{findingId}`
-            - State: `{state}`
-            - Reason: `{reason}`
-            - Filters: `{filters}`
-            - Mode: `{normalizedMode}`
-
-            > Dummy payload: this block intentionally simulates backend triage state.
-            """;
-
-            var combinedMarkdown = $"""
-            [INSTRUCTIONS FOR LLM]
-            {llmInstructions}
-
-            [CONTENT]
-            {markdownPayload}
-            """;
-
-            return new CallToolResult
+            if (string.Equals(normalizedAction, "bulk_decide_complete", StringComparison.Ordinal))
             {
-                Content = new List<ContentBlock>
-                {
-                    new TextContentBlock
+                var completedPayload = JsonSerializer.Serialize(new { success = true, message = "Bulk triage complete." });
+                return CreateDualPurposeResult(
+                    workflow: "Triage",
+                    action: normalizedAction,
+                    payload: completedPayload,
+                    resourceUri: BuildUiResourceUri("triage", normalizedAction, string.Empty),
+                    nextActionHint: "Task complete.");
+            }
+
+            string payload;
+            string nextActionHint;
+            string resourceId = string.Empty;
+
+            switch (normalizedAction)
+            {
+                case "status":
+                    payload = useGuidedFlow ? await TriageStatusGuided() : await TriageStatus();
+                    nextActionHint = "Call manage_triage with action='list' to review prioritized findings.";
+                    break;
+
+                case "list":
+                case "sql_issues":
+                case "sqlissues":
+                case "sqli":
+                    payload = useGuidedFlow
+                        ? await TriageListGuided(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit)
+                        : await TriageList(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit);
+                    nextActionHint = "Call manage_triage with action='inspect' and findingId='<id>' to review technical evidence.";
+                    break;
+
+                case "inspect":
+                    if (string.IsNullOrWhiteSpace(findingId))
                     {
-                        Text = combinedMarkdown
+                        throw new ArgumentException("findingId is required for inspect action.", nameof(findingId));
                     }
-                }
-            };
-        }
 
-        [McpServerTool]
-        [Description("MUST: Use this facade for SARIF discovery, filtering, code-flow extraction, and report generation. Set action to list_files, filter, extract_flow, or generate_report.")]
-        public static async Task<CallToolResult> analyze_sarif(
-            [Description("Routing action: list_files, filter, extract_flow, or generate_report.")]
-            string action,
-            [Description("SARIF file path or discovered filename. Required for filter and extract_flow actions.")]
-            string sarifPath = "",
-            [Description("Result identifier. Required for extract_flow and generate_report actions.")]
-            string resultId = "",
-            [Description("Optional JSON object for filters/options (severity, ruleId, category, sourceCodeRoot, outputPath, extractedFlowData).")]
-            string filters = "")
-        {
-            var options = ParseFacadeFilters(filters);
-            var normalizedAction = action?.Trim().ToLowerInvariant();
+                    resourceId = findingId;
+                    payload = useGuidedFlow
+                        ? await TriageInspectGuided(findingId, filterOptions.EvidenceMode)
+                        : await TriageInspect(findingId, filterOptions.EvidenceMode);
+                    nextActionHint = "Call manage_triage with action='decide', findingId='<id>', state='TP|FP', and reason='<required>'.";
+                    break;
 
-            var payload = normalizedAction switch
-            {
-                "list_files" => ListWorkspaceSarifFiles(),
-                "filter" => await LoadAndFilterSarif(sarifPath, options.Severity, options.RuleId, options.Category),
-                "extract_flow" => await ExtractCodeFlow(
-                    sarifPath,
-                    resultId,
-                    string.IsNullOrWhiteSpace(options.SourceCodeRoot) ? GetWorkspaceRoot() : options.SourceCodeRoot),
-                "generate_report" => GenerateAnalysisReport(resultId, options.ExtractedFlowData, options.OutputPath),
-                _ => throw new ArgumentException($"Unsupported analysis action: {action}", nameof(action))
-            };
+                case "decide":
+                    if (string.IsNullOrWhiteSpace(findingId))
+                    {
+                        throw new ArgumentException("findingId is required for decide action.", nameof(findingId));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(state))
+                    {
+                        throw new ArgumentException("state is required for decide action.", nameof(state));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(reason))
+                    {
+                        throw new ArgumentException("reason is required for decide action.", nameof(reason));
+                    }
+
+                    resourceId = findingId;
+                    payload = await Triage(findingId, state, reason, author);
+                    nextActionHint = "Call manage_triage with action='status' or action='list' to continue triage.";
+                    break;
+
+                case "bulk_decide":
+                    if (string.IsNullOrWhiteSpace(state))
+                    {
+                        throw new ArgumentException("state is required for bulk_decide action.", nameof(state));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(reason))
+                    {
+                        throw new ArgumentException("reason is required for bulk_decide action.", nameof(reason));
+                    }
+
+                    payload = await TriageBulk(
+                        state,
+                        reason,
+                        filterOptions.Severity,
+                        ruleFilter,
+                        filterOptions.File,
+                        filterOptions.DryRun,
+                        author);
+
+                    nextActionHint = filterOptions.DryRun
+                        ? "Call manage_triage with action='bulk_decide' and dryRun=false to persist decisions."
+                        : "Call manage_triage with action='status' to review updated triage posture.";
+                    break;
+
+                default:
+                    throw new ArgumentException("Action must be one of: status, list, inspect, decide, bulk_decide, sql_issues.", nameof(action));
+            }
 
             return CreateDualPurposeResult(
-                workflow: "analyze_sarif",
-                action: normalizedAction ?? string.Empty,
+                workflow: "Triage",
+                action: normalizedAction,
                 payload: payload,
-                resourceUri: BuildUiResourceUri("analysis", normalizedAction ?? string.Empty, resultId),
-                nextActionHint: "Type your next command (for example: `analyze_sarif extract_flow`).");
-        }
-
-        [Description("MUST: Call this helper to enumerate SARIF files discovered at server startup before any SARIF-path-dependent operation.")]
-        public static string ListWorkspaceSarifFiles()
-        {
-            List<string> files;
-            lock (SyncRoot)
-            {
-                files = _discoveredSarifFiles.ToList();
-            }
-
-            var payload = files.Select(path => new
-            {
-                name = Path.GetFileName(path),
-                path
-            });
-
-            return JsonSerializer.Serialize(payload);
+                resourceUri: BuildUiResourceUri("triage", normalizedAction, resourceId),
+                nextActionHint: nextActionHint);
         }
 
         [Description("MUST: Use this tool to obtain authoritative triage posture from loaded SARIF findings and local .sarif/triage.json state.")]
@@ -523,230 +525,6 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        [Description("MUST: Use this tool to parse a SARIF file and apply category/severity/rule filters. Do not infer filtered issues without this call.")]
-        public static async Task<string> LoadAndFilterSarif(
-            [Description("SARIF file path (absolute or filename discovered at startup).")]
-            string sarifPath,
-            [Description("Optional severity filter.")]
-            string severity = "",
-            [Description("Optional rule-id filter.")]
-            string ruleId = "",
-            [Description("Optional category keyword filter matched against message and rule id.")]
-            string category = "")
-        {
-            if (FileReader == null) throw new InvalidOperationException("FileReader is not initialized.");
-
-            var resolvedSarifPath = ResolveSarifPath(sarifPath);
-
-            if (!File.Exists(resolvedSarifPath))
-                return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
-
-            try
-            {
-                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
-                var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                if (sarifLog?.Runs == null || !sarifLog.Runs.Any())
-                    return JsonSerializer.Serialize(new { error = "Invalid or empty SARIF file." });
-
-                var results = sarifLog.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<SarifResult>()).ToList();
-
-                // Apply Filters
-                if (!string.IsNullOrWhiteSpace(severity))
-                    results = results.Where(r => string.Equals(r.Level, severity, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                if (!string.IsNullOrWhiteSpace(ruleId))
-                    results = results.Where(r => string.Equals(r.RuleId, ruleId, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                if (!string.IsNullOrWhiteSpace(category))
-                    results = results.Where(r => r.Message?.Text?.Contains(category, StringComparison.OrdinalIgnoreCase) == true ||
-                                                 r.RuleId?.Contains(category, StringComparison.OrdinalIgnoreCase) == true).ToList();
-
-                var simplifiedResults = results.Select((r, index) => new
-                {
-                    result_id = index.ToString(),
-                    rule_id = r.RuleId,
-                    level = r.Level ?? "warning",
-                    message = r.Message?.Text,
-                    location = r.Locations?.FirstOrDefault()?.PhysicalLocation?.ArtifactLocation?.Uri
-                });
-
-                return JsonSerializer.Serialize(simplifiedResults);
-            }
-            catch (Exception ex)
-            {
-                return JsonSerializer.Serialize(new { error = $"Failed to parse SARIF: {ex.Message}" });
-            }
-        }
-
-        [Description("MUST: Use this tool to extract source-to-sink data flow for a SARIF issue using Tree-sitter and fallback snippet windows.")]
-        public static async Task<string> ExtractCodeFlow(
-            [Description("SARIF file path (absolute or filename discovered at startup).")]
-            string sarifPath,
-            [Description("Result index from flattened SARIF results.")]
-            string resultId,
-            [Description("Workspace source-code root used to resolve artifact paths.")]
-            string sourceCodeRoot)
-        {
-            if (FileReader == null || TreeSitterEngine == null)
-                throw new InvalidOperationException("Core engines are not initialized.");
-
-            var resolvedSarifPath = ResolveSarifPath(sarifPath);
-
-            try
-            {
-                if (!File.Exists(resolvedSarifPath))
-                    return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
-
-                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
-                var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                var flattenedResults = sarifLog?.Runs
-                    .SelectMany(run => (run.Results ?? Enumerable.Empty<SarifResult>()).Select(result => (run, result)))
-                    .ToList();
-
-                if (flattenedResults == null || !int.TryParse(resultId, out int index) || index < 0 || index >= flattenedResults.Count)
-                    return JsonSerializer.Serialize(new { error = "Invalid resultId or result not found." });
-
-                var targetPair = flattenedResults[index];
-                var targetResult = targetPair.result;
-                var targetRun = targetPair.run;
-
-                if (targetResult.CodeFlows == null || !targetResult.CodeFlows.Any())
-                    return JsonSerializer.Serialize(new { message = "No code flow trace is available in the SARIF log for this issue." });
-
-                var flowSteps = new List<object>();
-                var threadFlows = targetResult.CodeFlows.SelectMany(cf => cf.ThreadFlows).ToList();
-
-                foreach (var threadFlow in threadFlows)
-                {
-                    foreach (var location in threadFlow.Locations)
-                    {
-                        var physLoc = location.Location?.PhysicalLocation;
-                        if (physLoc == null) continue;
-
-                        var relativePath = physLoc.ArtifactLocation?.Uri;
-                        if (string.IsNullOrEmpty(relativePath)) continue;
-
-                        var fullPath = FileHelper.ResolvePathForWorkspace(physLoc.ArtifactLocation, targetRun, sourceCodeRoot);
-
-                        string snippetCode = "Source file unavailable";
-
-                        string? sourceCode = null;
-                        try
-                        {
-                            sourceCode = await FileReader.ReadFileAsync(fullPath);
-                        }
-                        catch (IOException)
-                        {
-                            sourceCode = null;
-                        }
-                        catch (UnauthorizedAccessException)
-                        {
-                            sourceCode = null;
-                        }
-                        if (!string.IsNullOrWhiteSpace(sourceCode))
-                        {
-                            var language = GetLanguageFromExtension(Path.GetExtension(fullPath));
-
-                            var windowStartLine = physLoc.Region?.StartLine ?? 1;
-                            var windowEndLine = physLoc.Region?.EndLine > 0
-                                ? physLoc.Region.EndLine
-                                : windowStartLine;
-
-                            if (!string.IsNullOrWhiteSpace(language))
-                            {
-                                var startLine = Math.Max(0, windowStartLine - 1);
-                                var endLine = Math.Max(startLine, windowEndLine - 1);
-                                snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
-                            }
-
-                            if (string.IsNullOrWhiteSpace(snippetCode)
-                                || snippetCode.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                snippetCode = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
-                            }
-                        }
-
-                        flowSteps.Add(new
-                        {
-                            file_path = relativePath,
-                            start_line = physLoc.Region?.StartLine,
-                            message = location.Location?.Message?.Text,
-                            code_snippet = snippetCode.Trim()
-                        });
-                    }
-                }
-
-                return JsonSerializer.Serialize(new
-                {
-                    rule_id = targetResult.RuleId,
-                    flow_steps = flowSteps
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonSerializer.Serialize(new { error = $"Failed to extract code flow: {ex.Message}" });
-            }
-        }
-
-        private static string GetLanguageFromExtension(string extension)
-        {
-            return extension.ToLowerInvariant() switch
-            {
-                ".cs" => "csharp",
-                ".js" => "javascript",
-                ".ts" => "typescript",
-                ".py" => "python",
-                ".java" => "java",
-                ".cpp" => "cpp",
-                ".c" => "c",
-                ".go" => "go",
-                ".rs" => "rust",
-                ".rb" => "ruby",
-                ".php" => "php",
-                ".html" => "html",
-                ".css" => "css",
-                ".json" => "json",
-                ".xml" => "xml",
-                ".yaml" => "yaml",
-                ".yml" => "yaml",
-                ".md" => "markdown",
-                ".sh" => "bash",
-                ".ps1" => "powershell",
-                ".sql" => "sql",
-            _ => string.Empty
-            };
-        }
-
-        private static string ResolveSarifPath(string sarifPath)
-        {
-            if (Path.IsPathRooted(sarifPath))
-            {
-                return sarifPath;
-            }
-
-            lock (SyncRoot)
-            {
-                var matchByFullPath = _discoveredSarifFiles.FirstOrDefault(path =>
-                    string.Equals(path, sarifPath, StringComparison.OrdinalIgnoreCase));
-
-                if (!string.IsNullOrWhiteSpace(matchByFullPath))
-                {
-                    return matchByFullPath;
-                }
-
-                var matchByFileName = _discoveredSarifFiles.FirstOrDefault(path =>
-                    string.Equals(Path.GetFileName(path), sarifPath, StringComparison.OrdinalIgnoreCase));
-
-                if (!string.IsNullOrWhiteSpace(matchByFileName))
-                {
-                    return matchByFileName;
-                }
-            }
-
-            return sarifPath;
-        }
-
         private static FacadeFilterOptions ParseFacadeFilters(string filters)
         {
             if (string.IsNullOrWhiteSpace(filters))
@@ -984,6 +762,9 @@ namespace Sarifintown.AgentEngine
 
             List<string> discoveredFiles;
             string workspaceRoot;
+            var stateService = StateService;
+            var snippetCache = SnippetCache;
+            var snippetWarmupService = SnippetWarmupService;
 
             lock (SyncRoot)
             {
@@ -991,7 +772,26 @@ namespace Sarifintown.AgentEngine
                 workspaceRoot = _workspaceRoot;
             }
 
-            return new TriageWorkflowService(FileReader, TreeSitterEngine, workspaceRoot, discoveredFiles);
+            stateService ??= new SarifStateService(
+                FileReader,
+                Options.Create(new SarifPreloadOptions
+                {
+                    Strategy = PreloadStrategy.LatestPerTool,
+                    EnableSnippetPreload = false,
+                    MaxPreloadedSnippets = 0
+                }),
+                workspaceRoot,
+                discoveredFiles);
+
+            snippetCache ??= new SnippetCacheService();
+
+            return new TriageWorkflowService(
+                FileReader,
+                TreeSitterEngine,
+                stateService,
+                workspaceRoot,
+                snippetCache,
+                snippetWarmupService);
         }
 
         private static string DetectHost(McpServer thisServer, string hostHint)

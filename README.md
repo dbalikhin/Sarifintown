@@ -23,6 +23,8 @@ MCP server support is available via `Sarifintown.Engine`; see the concise setup 
 - Group and filter results by severity, rule and file path.
 - MCP tools for SARIF discovery, filtering, flow extraction, analysis report generation, and triage workflows.
 - Shared triage state persisted in `.sarif/triage.json` for MCP/CLI triage commands.
+- In-memory SARIF findings cache with configurable preload strategy for low-latency triage commands.
+- JIT snippet warmup queue that anticipates `TriageInspect` after `TriageList`/`TriageListGuided` responses.
 
 ## Prerequisites
 
@@ -68,6 +70,28 @@ MCP prompt primitives are also exposed:
 - `SarifintownInspectFinding`
 
 These commands use loaded SARIF findings and persist decision state to `.sarif/triage.json`.
+
+## Engine preload and warmup configuration
+
+`Sarifintown.Engine` supports preload and snippet warmup tuning via `.sarif/engine.json` and environment variables.
+
+Example `.sarif/engine.json`:
+
+```json
+{
+  "Preload": {
+    "Strategy": "LatestPerTool",
+    "EnableSnippetPreload": true,
+    "MaxPreloadedSnippets": 50
+  }
+}
+```
+
+Equivalent environment variables:
+
+- `SARIFINTOWN_Preload__Strategy` = `None` | `LatestPerTool` | `All`
+- `SARIFINTOWN_Preload__EnableSnippetPreload` = `true` | `false`
+- `SARIFINTOWN_Preload__MaxPreloadedSnippets` = integer
 
 ## License
 

@@ -7,16 +7,6 @@ namespace Sarifintown.AgentEngine;
 public static class SarifPrompts
 {
     /// <summary>
-    /// Builds a slash-command prompt that forces workspace SARIF discovery before analysis.
-    /// </summary>
-    [McpServerPrompt(Name = "sarif.list-files", Title = "List Discovered SARIF Files")]
-    [Description("MUST: Use this slash command to enumerate discovered SARIF files before any SARIF-path-dependent action.")]
-    public static string ListWorkspaceSarifFilesPrompt()
-    {
-        return "MUST call `analyze_sarif` with action='list_files' and use only returned file names/paths for follow-up tools.";
-    }
-
-    /// <summary>
     /// Builds a slash-command prompt that requests non-guided triage status.
     /// </summary>
     [McpServerPrompt(Name = "sarif.triage.status", Title = "Triage Status")]
@@ -47,20 +37,58 @@ public static class SarifPrompts
     }
 
     /// <summary>
-    /// Builds a kickoff slash-command prompt that starts file analysis through the facade.
+    /// Builds a slash-command prompt to inspect one finding from the aggregated triage state.
     /// </summary>
-    [McpServerPrompt(Name = "sarif.analyze.file", Title = "Analyze SARIF File")]
-    [Description("MUST: Use this kickoff slash command to start SARIF file analysis via the facade.")]
-    public static string AnalyzeFilePrompt(
-        [Description("SARIF file path or discovered filename.")]
-        string sarifPath,
+    [McpServerPrompt(Name = "sarif.triage.inspect", Title = "Inspect Finding")]
+    [Description("MUST: Use this prompt to inspect technical evidence for one FindingId from triage list results.")]
+    public static string TriageInspectPrompt(
+        [Description("Finding identifier returned by triage listing commands.")]
+        string findingId,
+        [Description("Optional evidence mode override (line-window-strict, line-window-concatenated, tree-sitter-method).")]
+        string evidenceMode = "")
+    {
+        return $"Call `manage_triage` with action='inspect', findingId='{findingId}', filters='{{\"evidenceMode\":\"{evidenceMode}\"}}'.";
+    }
+
+    /// <summary>
+    /// Builds a slash-command prompt to apply TP/FP decision to one finding.
+    /// </summary>
+    [McpServerPrompt(Name = "sarif.triage.apply", Title = "Apply Triage Decision")]
+    [Description("MUST: Use this prompt to persist TP/FP for one finding via the triage facade.")]
+    public static string TriageApplyPrompt(
+        [Description("Finding identifier returned by triage listing commands.")]
+        string findingId,
+        [Description("Decision state TP or FP.")]
+        string state,
+        [Description("Required decision reason.")]
+        string reason,
+        [Description("Optional decision author label.")]
+        string author = "AI")
+    {
+        return $"Call `manage_triage` with action='decide', findingId='{findingId}', state='{state}', reason='{reason}', filters='{{\"author\":\"{author}\"}}'.";
+    }
+
+    /// <summary>
+    /// Builds a slash-command prompt to apply TP/FP decision to multiple findings.
+    /// </summary>
+    [McpServerPrompt(Name = "sarif.triage.bulk", Title = "Bulk Triage Decision")]
+    [Description("MUST: Use this prompt to run bulk TP/FP triage updates over filtered findings.")]
+    public static string TriageBulkPrompt(
+        [Description("Decision state TP or FP.")]
+        string state,
+        [Description("Required decision reason.")]
+        string reason,
         [Description("Optional severity filter.")]
         string severity = "",
         [Description("Optional rule filter.")]
-        string ruleId = "",
-        [Description("Optional category keyword filter.")]
-        string category = "")
+        string rule = "",
+        [Description("Optional file filter.")]
+        string file = "",
+        [Description("When true, preview affected findings without writing triage state.")]
+        bool dryRun = false,
+        [Description("Optional decision author label.")]
+        string author = "AI")
     {
-        return $"Call `analyze_sarif` with action='filter', sarifPath='{sarifPath}', filters='{{\"severity\":\"{severity}\",\"ruleId\":\"{ruleId}\",\"category\":\"{category}\"}}'.";
+        return $"Call `manage_triage` with action='bulk_decide', state='{state}', reason='{reason}', filters='{{\"severity\":\"{severity}\",\"rule\":\"{rule}\",\"file\":\"{file}\",\"dryRun\":{dryRun.ToString().ToLowerInvariant()},\"author\":\"{author}\"}}'.";
     }
 }
