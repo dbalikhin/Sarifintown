@@ -119,17 +119,17 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool]
-        [Description("MUST: Use this facade for all triage workflows. Set action to one of: status, list, inspect, decide, or bulk_decide.")]
+        [Description("MUST: Use this facade for all triage workflows. Preferred actions are query and decide; legacy aliases status/list/inspect/bulk_decide are supported.")]
         public static async Task<CallToolResult> manage_triage(
-            [Description("Routing action: status, list, inspect, decide, or bulk_decide.")]
+            [Description("Routing action: query or decide (legacy aliases status/list/inspect/bulk_decide/sql_issues are accepted).")]
             string action,
-            [Description("Finding identifier. Required for inspect and decide actions.")]
+            [Description("Finding identifier for query deep-dive or single-target decide.")]
             string findingId = "",
-            [Description("Decision state TP/FP. Required for decide and bulk_decide actions.")]
+            [Description("Decision state TP/FP. Required for decide action.")]
             string state = "",
-            [Description("Decision reason. Required for decide and bulk_decide actions.")]
+            [Description("Decision reason. Required for decide action.")]
             string reason = "",
-            [Description("Optional JSON object for filters and options (severity, rule, file, limit, guided, dryRun, evidenceMode, author).")]
+            [Description("Optional JSON object for filters and options (severity, rule, file, limit, state, includeEvidence, findingIds, dryRun, evidenceMode, author).")]
             string filters = "",
             [Description("Execution mode: interactive or agentic. Interactive pauses for user input; agentic enforces autonomous next-step chaining.")]
             string mode = "interactive")
@@ -148,6 +148,13 @@ namespace Sarifintown.AgentEngine
             {
                 ruleFilter = "csharp/Sqli,SQLInjection,SqlInjection";
             }
+
+            normalizedAction = normalizedAction switch
+            {
+                "list" or "inspect" or "sql_issues" or "sqlissues" or "sqli" => "query",
+                "bulk_decide" => "decide",
+                _ => normalizedAction
+            };
 
             if (string.Equals(normalizedAction, "bulk_decide_complete", StringComparison.Ordinal))
             {
@@ -176,34 +183,65 @@ namespace Sarifintown.AgentEngine
             {
                 case "status":
                     payload = await TriageStatusGuided();
-                    nextActionHint = "Call manage_triage with action='list' to review prioritized findings.";
+                    nextActionHint = "Call manage_triage with action='query' to review posture with prioritized findings.";
                     break;
 
-                case "list":
-                case "sql_issues":
-                case "sqlissues":
-                case "sqli":
-                    payload = await TriageListGuided(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit);
-                    nextActionHint = "Call manage_triage with action='inspect' and findingId='<id>' to review technical evidence.";
-                    break;
-
-                case "inspect":
-                    if (string.IsNullOrWhiteSpace(findingId))
+                case "query":
+                    if (!string.IsNullOrWhiteSpace(findingId))
                     {
-                        throw new ArgumentException("findingId is required for inspect action.", nameof(findingId));
+                        resourceId = findingId;
+                        payload = await TriageInspectGuided(findingId, filterOptions.EvidenceMode);
+                        nextActionHint = "Call manage_triage with action='decide', findingId='<id>', state='TP|FP', and reason='<required>'.";
+                        break;
                     }
 
-                    resourceId = findingId;
-                    payload = await TriageInspectGuided(findingId, filterOptions.EvidenceMode);
-                    nextActionHint = "Call manage_triage with action='decide', findingId='<id>', state='TP|FP', and reason='<required>'.";
+                    var queryWorkflow = CreateTriageWorkflowService();
+                    var statusResult = await queryWorkflow.GetStatusAsync();
+                    var findings = await queryWorkflow.ListAsync(new TriageQueryOptions(
+                        filterOptions.Severity,
+                        ruleFilter,
+                        filterOptions.File,
+                        filterOptions.State,
+                        filterOptions.Limit));
+
+                    var evidence = new List<TriageInspectResult>();
+                    if (filterOptions.IncludeEvidence)
+                    {
+                        foreach (var item in findings)
+                        {
+                            var inspect = await queryWorkflow.InspectAsync(item.FindingId, filterOptions.EvidenceMode);
+                            if (inspect != null)
+                            {
+                                evidence.Add(inspect);
+                            }
+                        }
+                    }
+
+                    payload = CreateGuidedResponse(
+                        workflowName: "triage-query",
+                        data: new
+                        {
+                            status = statusResult,
+                            findings,
+                            includeEvidence = filterOptions.IncludeEvidence,
+                            evidence
+                        },
+                        markdown: BuildGuidedQueryMarkdown(statusResult, findings, filterOptions.IncludeEvidence, evidence.Count),
+                        nextTool: "manage_triage",
+                        nextToolArguments: findings.Count > 0
+                            ? new { action = "query", findingId = "<reply-with-finding-id>", filters = "{\"evidenceMode\":\"line-window-concatenated\"}" }
+                            : new { action = "query", filters = "{\"limit\":10}" },
+                        pauseForUserInput: true,
+                        pausePrompt: findings.Count > 0
+                            ? "Reply with a FindingId to deep-dive evidence or provide new filters."
+                            : "Reply with updated filters to continue triage query.");
+
+                    nextActionHint = findings.Count > 0
+                        ? "Call manage_triage with action='query' and findingId='<id>' for deep evidence, or action='decide' to apply TP/FP."
+                        : "Call manage_triage with action='query' and broader filters to retrieve findings.";
                     break;
 
                 case "decide":
-                    if (string.IsNullOrWhiteSpace(findingId))
-                    {
-                        throw new ArgumentException("findingId is required for decide action.", nameof(findingId));
-                    }
-
                     if (string.IsNullOrWhiteSpace(state))
                     {
                         throw new ArgumentException("state is required for decide action.", nameof(state));
@@ -214,63 +252,96 @@ namespace Sarifintown.AgentEngine
                         throw new ArgumentException("reason is required for decide action.", nameof(reason));
                     }
 
-                    resourceId = findingId;
-                    var decisionJson = await Triage(findingId, state, reason, author);
-                    var decisionData = JsonSerializer.Deserialize<JsonElement>(decisionJson);
+                    JsonElement decisionData;
+                    string workflowName;
+                    string pausePrompt;
+
+                    if (!string.IsNullOrWhiteSpace(findingId))
+                    {
+                        resourceId = findingId;
+                        var singleDecisionJson = await Triage(findingId, state, reason, author);
+                        decisionData = JsonSerializer.Deserialize<JsonElement>(singleDecisionJson);
+                        workflowName = "triage-decide-single";
+                        pausePrompt = "Reply with `query` to refresh posture or continue triage.";
+                    }
+                    else
+                    {
+                        var decisionWorkflow = CreateTriageWorkflowService();
+                        var targetFindingIds = ResolveFindingIds(filterOptions.FindingIds);
+
+                        if (targetFindingIds.Count > 0)
+                        {
+                            if (filterOptions.DryRun)
+                            {
+                                var dryRunPayload = new TriageBulkResult(
+                                    true,
+                                    $"Dry run complete. {targetFindingIds.Count} findings would be triaged.",
+                                    targetFindingIds.Count,
+                                    targetFindingIds,
+                                    true);
+                                decisionData = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(dryRunPayload));
+                            }
+                            else
+                            {
+                                var modifiedFindingIds = new List<string>();
+                                foreach (var targetFindingId in targetFindingIds)
+                                {
+                                    var decision = await decisionWorkflow.TriageAsync(targetFindingId, state, reason, author);
+                                    if (decision.Success)
+                                    {
+                                        modifiedFindingIds.Add(targetFindingId);
+                                    }
+                                }
+
+                                var idsPayload = new TriageBulkResult(
+                                    modifiedFindingIds.Count > 0,
+                                    $"Triage updated {modifiedFindingIds.Count} findings.",
+                                    modifiedFindingIds.Count,
+                                    modifiedFindingIds,
+                                    false);
+                                decisionData = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(idsPayload));
+                            }
+
+                            workflowName = "triage-decide-ids";
+                            pausePrompt = filterOptions.DryRun
+                                ? "Reply with `decide` and dryRun=false to persist these decisions."
+                                : "Reply with `query` to refresh posture and continue triage.";
+                        }
+                        else
+                        {
+                            var bulkDecisionJson = await TriageBulk(
+                                state,
+                                reason,
+                                filterOptions.Severity,
+                                ruleFilter,
+                                filterOptions.File,
+                                filterOptions.DryRun,
+                                author);
+
+                            decisionData = JsonSerializer.Deserialize<JsonElement>(bulkDecisionJson);
+                            workflowName = "triage-decide-filtered";
+                            pausePrompt = filterOptions.DryRun
+                                ? "Reply with `decide` and dryRun=false to persist these decisions."
+                                : "Reply with `query` to confirm updated triage posture.";
+                        }
+                    }
+
                     payload = CreateGuidedResponse(
-                        workflowName: "triage-decide",
+                        workflowName: workflowName,
                         data: decisionData,
-                        markdown: BuildGuidedDecisionMarkdown(decisionData),
+                        markdown: BuildGuidedDecideMarkdown(decisionData),
                         nextTool: "manage_triage",
-                        nextToolArguments: new { action = "status" },
+                        nextToolArguments: new { action = "query", filters = "{\"limit\":10}" },
                         pauseForUserInput: true,
-                        pausePrompt: "Reply with `status` to refresh triage posture or `list` to continue triage.");
-                    nextActionHint = "Call manage_triage with action='status' or action='list' to continue triage.";
-                    break;
-
-                case "bulk_decide":
-                    if (string.IsNullOrWhiteSpace(state))
-                    {
-                        throw new ArgumentException("state is required for bulk_decide action.", nameof(state));
-                    }
-
-                    if (string.IsNullOrWhiteSpace(reason))
-                    {
-                        throw new ArgumentException("reason is required for bulk_decide action.", nameof(reason));
-                    }
-
-                    payload = await TriageBulk(
-                        state,
-                        reason,
-                        filterOptions.Severity,
-                        ruleFilter,
-                        filterOptions.File,
-                        filterOptions.DryRun,
-                        author);
-
-                    var bulkData = JsonSerializer.Deserialize<JsonElement>(payload);
-                    object bulkNextToolArguments = filterOptions.DryRun
-                        ? (object)new { action = "bulk_decide", state, reason, filters = "{\"dryRun\":false}" }
-                        : new { action = "status" };
-
-                    payload = CreateGuidedResponse(
-                        workflowName: "triage-bulk",
-                        data: bulkData,
-                        markdown: BuildGuidedBulkMarkdown(bulkData),
-                        nextTool: "manage_triage",
-                        nextToolArguments: bulkNextToolArguments,
-                        pauseForUserInput: true,
-                        pausePrompt: filterOptions.DryRun
-                            ? "Reply with `bulk_decide` and dryRun=false to persist these decisions."
-                            : "Reply with `status` to confirm updated triage posture.");
+                        pausePrompt: pausePrompt);
 
                     nextActionHint = filterOptions.DryRun
-                        ? "Call manage_triage with action='bulk_decide' and dryRun=false to persist decisions."
-                        : "Call manage_triage with action='status' to review updated triage posture.";
+                        ? "Call manage_triage with action='decide' and dryRun=false to persist decisions."
+                        : "Call manage_triage with action='query' to review updated triage posture.";
                     break;
 
                 default:
-                    throw new ArgumentException("Action must be one of: status, list, inspect, decide, bulk_decide, sql_issues.", nameof(action));
+                    throw new ArgumentException("Action must be one of: query or decide. Legacy aliases status/list/inspect/bulk_decide/sql_issues are also accepted.", nameof(action));
             }
 
             return CreateDualPurposeResult(
@@ -752,6 +823,68 @@ namespace Sarifintown.AgentEngine
             });
         }
 
+        private static string BuildGuidedQueryMarkdown(
+            TriageStatusResult status,
+            IReadOnlyList<TriageListItem> findings,
+            bool includeEvidence,
+            int evidenceCount)
+        {
+            var lines = new List<string>
+            {
+                "## SARIF Triage Query",
+                string.Empty,
+                $"- Total findings: **{status.TotalFindings}**",
+                $"- Open findings: **{status.OpenCount}**",
+                $"- Triaged findings: **{status.TriagedCount}**",
+                $"- True positives: **{status.TruePositiveCount}**",
+                $"- False positives: **{status.FalsePositiveCount}**",
+                string.Empty
+            };
+
+            if (findings.Count == 0)
+            {
+                lines.Add("No findings matched the provided filters.");
+            }
+            else
+            {
+                lines.Add("| FindingId | Severity | State | Rule | Location | Score |\n|---|---|---|---|---|---|");
+                lines.AddRange(findings.Select(item =>
+                    $"| `{EscapeMarkdown(item.FindingId)}` | `{EscapeMarkdown(item.Severity)}` | `{EscapeMarkdown(item.State)}` | `{EscapeMarkdown(item.RuleName)}` | `{EscapeMarkdown(item.FilePath)}`:{item.LineNumber?.ToString() ?? "?"} | {item.PriorityScore:F2} |"));
+            }
+
+            lines.Add(string.Empty);
+            lines.Add(includeEvidence
+                ? $"Included evidence payloads: **{evidenceCount}**"
+                : "Evidence snippets not included. Set `includeEvidence=true` for narrow scopes.");
+            lines.Add("**Next action:** Reply with a `FindingId` to deep-dive via `query`, or call `decide` to persist TP/FP.");
+            lines.Add("Then pause for user input.");
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private static string BuildGuidedDecideMarkdown(JsonElement decision)
+        {
+            if (decision.TryGetProperty("FindingId", out _))
+            {
+                return BuildGuidedDecisionMarkdown(decision);
+            }
+
+            return BuildGuidedBulkMarkdown(decision);
+        }
+
+        private static List<string> ResolveFindingIds(string findingIds)
+        {
+            if (string.IsNullOrWhiteSpace(findingIds))
+            {
+                return new List<string>();
+            }
+
+            return findingIds
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+
         private static string BuildGuidedFindingsMarkdown(IReadOnlyList<TriageListItem> findings)
         {
             if (findings.Count == 0)
@@ -1132,6 +1265,8 @@ namespace Sarifintown.AgentEngine
             public string File { get; init; } = string.Empty;
             public string State { get; init; } = string.Empty;
             public int Limit { get; init; } = 10;
+            public bool IncludeEvidence { get; init; }
+            public string FindingIds { get; init; } = string.Empty;
             public bool Guided { get; init; }
             public bool DryRun { get; init; }
             public string EvidenceMode { get; init; } = string.Empty;

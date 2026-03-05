@@ -34,6 +34,127 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
+        public async Task ManageTriage_WithQueryAction_ReturnsStatusAndPrioritizedFindingsInSingleResponse()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "facade-query.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-QUERY",
+                      "level": "error",
+                      "message": { "text": "query me" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Query.cs" },
+                            "region": { "startLine": 11 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var queryResult = await SarifTools.manage_triage("query", filters: "{\"limit\":1}");
+                var queryText = queryResult.Content[0] as TextContentBlock;
+
+                Assert.That(queryText, Is.Not.Null);
+                Assert.That(queryText!.Text, Contains.Substring("## SARIF Triage Query"));
+                Assert.That(queryText.Text, Contains.Substring("Total findings"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task ManageTriage_WithDecideActionAndFindingIdsFilter_AppliesMultiTargetDecision()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "facade-decide-ids.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-IDS-1",
+                      "level": "error",
+                      "message": { "text": "first" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Ids1.cs" },
+                            "region": { "startLine": 5 }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "ruleId": "RULE-IDS-2",
+                      "level": "warning",
+                      "message": { "text": "second" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Ids2.cs" },
+                            "region": { "startLine": 7 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 2);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingIds = string.Join(",", listPayload!.Select(item => item.GetProperty("FindingId").GetString()));
+
+                var decideResult = await SarifTools.manage_triage(
+                    "decide",
+                    state: "FP",
+                    reason: "campaign",
+                    filters: $"{{\"findingIds\":\"{findingIds}\"}}");
+
+                var decideText = decideResult.Content[0] as TextContentBlock;
+                Assert.That(decideText, Is.Not.Null);
+                Assert.That(decideText!.Text, Contains.Substring("## Bulk Triage Result"));
+                Assert.That(decideText.Text, Contains.Substring("Affected Findings: **2**"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
         public async Task TriageList_WithLatestPerToolPreload_IncludesOnlyNewestFilePerTool()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
