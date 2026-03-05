@@ -181,41 +181,20 @@ static IReadOnlyList<string> ResolveCompletionValues(
 
     IEnumerable<string> candidates = normalizedPrompt switch
     {
-        "sarif.triage.list" => normalizedArgument switch
+        "sarif.get" => normalizedArgument switch
         {
-            "severity" => completionData.Severities,
-            "rule" => completionData.Rules,
-            "file" => completionData.Files,
-            "state" => completionData.ListStates,
+            "scope" => new[] { "keep", "set", "refine", "clear" },
+            "includeEvidence" => new[] { "true", "false" },
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },
-        "sarif.triage.inspect" => normalizedArgument switch
-        {
-            "findingId" => completionData.FindingIds,
-            "evidenceMode" => completionData.EvidenceModes,
-            _ => Array.Empty<string>()
-        },
-        "sarif.triage.apply" => normalizedArgument switch
-        {
-            "findingId" => completionData.FindingIds,
-            "state" => completionData.DecisionStates,
-            "reason" => completionData.Reasons,
-            "author" => completionData.Authors,
-            _ => Array.Empty<string>()
-        },
-        "sarif.triage.bulk" => normalizedArgument switch
+        "sarif.triage" => normalizedArgument switch
         {
             "state" => completionData.DecisionStates,
             "reason" => completionData.Reasons,
-            "severity" => completionData.Severities,
-            "rule" => completionData.Rules,
-            "file" => completionData.Files,
-            "dryRun" => completionData.DryRunValues,
-            "author" => completionData.Authors,
+            "target" => new[] { "scope" },
             _ => Array.Empty<string>()
         },
-        "sarif.triage.status" => Array.Empty<string>(),
         _ => Array.Empty<string>()
     };
 

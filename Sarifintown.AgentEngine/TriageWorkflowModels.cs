@@ -85,6 +85,60 @@ internal sealed record TriageBulkResult(
     IReadOnlyList<string> ModifiedFindingIds,
     bool DryRun);
 
+internal enum ScopeAction
+{
+    Keep = 0,
+    Set = 1,
+    Refine = 2,
+    Clear = 3
+}
+
+internal sealed record ActiveScopeFilter(
+    string Severity = "",
+    string Rule = "",
+    string File = "",
+    string State = "")
+{
+    public bool IsEmpty => string.IsNullOrWhiteSpace(Severity)
+        && string.IsNullOrWhiteSpace(Rule)
+        && string.IsNullOrWhiteSpace(File)
+        && string.IsNullOrWhiteSpace(State);
+
+    public TriageQueryOptions ToQueryOptions(int limit)
+    {
+        return new TriageQueryOptions(
+            Severity,
+            Rule,
+            File,
+            State,
+            limit);
+    }
+}
+
+internal sealed record SarifGetMetrics(
+    int TotalInScope,
+    int ReturnedInBatch,
+    int RemainingInScope);
+
+internal sealed record SarifGetContext(
+    string Notice,
+    IReadOnlyDictionary<string, string> ActiveScope,
+    SarifGetMetrics Metrics);
+
+internal sealed record SarifGetFinding(
+    string FindingId,
+    string RuleName,
+    string FilePath,
+    int? LineNumber,
+    string Severity,
+    double PriorityScore,
+    string State,
+    TriageInspectResult? Evidence);
+
+internal sealed record SarifGetResponse(
+    SarifGetContext Context,
+    IReadOnlyList<SarifGetFinding> Findings);
+
 internal sealed record TriageFindingEnvelope(
     string FindingId,
     Sarifintown.Models.Result Result,
