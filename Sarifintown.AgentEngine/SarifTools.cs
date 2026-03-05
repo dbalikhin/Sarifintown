@@ -141,19 +141,25 @@ namespace Sarifintown.AgentEngine
 
             var filterOptions = ParseFacadeFilters(filters);
             var normalizedAction = action.Trim().ToLowerInvariant();
-            var normalizedMode = mode?.Trim().ToLowerInvariant();
-            var useGuidedFlow = filterOptions.Guided || string.Equals(normalizedMode, "agentic", StringComparison.Ordinal);
             var author = string.IsNullOrWhiteSpace(filterOptions.Author) ? "AI" : filterOptions.Author;
             var ruleFilter = string.IsNullOrWhiteSpace(filterOptions.Rule) ? filterOptions.RuleId : filterOptions.Rule;
 
             if ((normalizedAction is "sql_issues" or "sqlissues" or "sqli") && string.IsNullOrWhiteSpace(ruleFilter))
             {
-                ruleFilter = "sqli";
+                ruleFilter = "csharp/Sqli,SQLInjection,SqlInjection";
             }
 
             if (string.Equals(normalizedAction, "bulk_decide_complete", StringComparison.Ordinal))
             {
-                var completedPayload = JsonSerializer.Serialize(new { success = true, message = "Bulk triage complete." });
+                var completedPayload = CreateGuidedResponse(
+                    workflowName: "triage-bulk-complete",
+                    data: new { success = true, message = "Bulk triage complete." },
+                    markdown: "## Bulk Triage Complete",
+                    nextTool: "manage_triage",
+                    nextToolArguments: new { action = "status" },
+                    pauseForUserInput: true,
+                    pausePrompt: "Reply with `status` to review the current triage posture.");
+
                 return CreateDualPurposeResult(
                     workflow: "Triage",
                     action: normalizedAction,
@@ -169,7 +175,7 @@ namespace Sarifintown.AgentEngine
             switch (normalizedAction)
             {
                 case "status":
-                    payload = useGuidedFlow ? await TriageStatusGuided() : await TriageStatus();
+                    payload = await TriageStatusGuided();
                     nextActionHint = "Call manage_triage with action='list' to review prioritized findings.";
                     break;
 
@@ -177,9 +183,7 @@ namespace Sarifintown.AgentEngine
                 case "sql_issues":
                 case "sqlissues":
                 case "sqli":
-                    payload = useGuidedFlow
-                        ? await TriageListGuided(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit)
-                        : await TriageList(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit);
+                    payload = await TriageListGuided(filterOptions.Severity, ruleFilter, filterOptions.File, filterOptions.State, filterOptions.Limit);
                     nextActionHint = "Call manage_triage with action='inspect' and findingId='<id>' to review technical evidence.";
                     break;
 
@@ -190,9 +194,7 @@ namespace Sarifintown.AgentEngine
                     }
 
                     resourceId = findingId;
-                    payload = useGuidedFlow
-                        ? await TriageInspectGuided(findingId, filterOptions.EvidenceMode)
-                        : await TriageInspect(findingId, filterOptions.EvidenceMode);
+                    payload = await TriageInspectGuided(findingId, filterOptions.EvidenceMode);
                     nextActionHint = "Call manage_triage with action='decide', findingId='<id>', state='TP|FP', and reason='<required>'.";
                     break;
 
@@ -213,7 +215,16 @@ namespace Sarifintown.AgentEngine
                     }
 
                     resourceId = findingId;
-                    payload = await Triage(findingId, state, reason, author);
+                    var decisionJson = await Triage(findingId, state, reason, author);
+                    var decisionData = JsonSerializer.Deserialize<JsonElement>(decisionJson);
+                    payload = CreateGuidedResponse(
+                        workflowName: "triage-decide",
+                        data: decisionData,
+                        markdown: BuildGuidedDecisionMarkdown(decisionData),
+                        nextTool: "manage_triage",
+                        nextToolArguments: new { action = "status" },
+                        pauseForUserInput: true,
+                        pausePrompt: "Reply with `status` to refresh triage posture or `list` to continue triage.");
                     nextActionHint = "Call manage_triage with action='status' or action='list' to continue triage.";
                     break;
 
@@ -236,6 +247,22 @@ namespace Sarifintown.AgentEngine
                         filterOptions.File,
                         filterOptions.DryRun,
                         author);
+
+                    var bulkData = JsonSerializer.Deserialize<JsonElement>(payload);
+                    object bulkNextToolArguments = filterOptions.DryRun
+                        ? (object)new { action = "bulk_decide", state, reason, filters = "{\"dryRun\":false}" }
+                        : new { action = "status" };
+
+                    payload = CreateGuidedResponse(
+                        workflowName: "triage-bulk",
+                        data: bulkData,
+                        markdown: BuildGuidedBulkMarkdown(bulkData),
+                        nextTool: "manage_triage",
+                        nextToolArguments: bulkNextToolArguments,
+                        pauseForUserInput: true,
+                        pausePrompt: filterOptions.DryRun
+                            ? "Reply with `bulk_decide` and dryRun=false to persist these decisions."
+                            : "Reply with `status` to confirm updated triage posture.");
 
                     nextActionHint = filterOptions.DryRun
                         ? "Call manage_triage with action='bulk_decide' and dryRun=false to persist decisions."
@@ -608,6 +635,20 @@ namespace Sarifintown.AgentEngine
 
         private static string BuildPassThroughMarkdown(string workflow, string action, string payload, string nextActionHint)
         {
+            if (TryExtractGuidedMarkdown(payload, out var guidedMarkdown))
+            {
+                return $"""
+                [INSTRUCTIONS FOR LLM]
+                You are acting as a UI renderer. Output the exact Markdown in the [CONTENT] block verbatim.
+                Do NOT summarize it. After rendering, PAUSE and wait for the user to type the next command.
+
+                [CONTENT]
+                {guidedMarkdown}
+
+                **Next Action:** {nextActionHint}
+                """;
+            }
+
             return $"""
             [INSTRUCTIONS FOR LLM]
             You are acting as a UI renderer. Output the exact Markdown in the [CONTENT] block verbatim.
@@ -622,6 +663,32 @@ namespace Sarifintown.AgentEngine
 
             **Next Action:** {nextActionHint}
             """;
+        }
+
+        private static bool TryExtractGuidedMarkdown(string payload, out string markdown)
+        {
+            markdown = string.Empty;
+            if (string.IsNullOrWhiteSpace(payload))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(payload);
+                if (!document.RootElement.TryGetProperty("markdown", out var markdownElement)
+                    || markdownElement.ValueKind != JsonValueKind.String)
+                {
+                    return false;
+                }
+
+                markdown = markdownElement.GetString() ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(markdown);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
         }
 
         private static string BuildUiResourceUri(string routePrefix, string action, string id)
@@ -711,6 +778,60 @@ namespace Sarifintown.AgentEngine
                 .. lines,
                 string.Empty,
                 "**Next action:** Reply with a `FindingId` value to inspect evidence.",
+                "Then pause for user input."
+            ]);
+        }
+
+        private static string BuildGuidedDecisionMarkdown(JsonElement decision)
+        {
+            var success = decision.TryGetProperty("Success", out var successElement) && successElement.GetBoolean();
+            var findingId = decision.TryGetProperty("FindingId", out var findingIdElement)
+                ? findingIdElement.GetString() ?? string.Empty
+                : string.Empty;
+            var state = decision.TryGetProperty("State", out var stateElement)
+                ? stateElement.GetString() ?? string.Empty
+                : string.Empty;
+            var message = decision.TryGetProperty("Message", out var messageElement)
+                ? messageElement.GetString() ?? string.Empty
+                : string.Empty;
+
+            return string.Join(Environment.NewLine,
+            [
+                "## Triage Decision Result",
+                string.Empty,
+                $"- Success: **{success}**",
+                $"- FindingId: `{EscapeMarkdown(findingId)}`",
+                $"- State: `{EscapeMarkdown(state)}`",
+                $"- Message: {EscapeMarkdown(message)}",
+                string.Empty,
+                "**Next action:** Reply with `status` to refresh posture or `list` to continue triage.",
+                "Then pause for user input."
+            ]);
+        }
+
+        private static string BuildGuidedBulkMarkdown(JsonElement bulk)
+        {
+            var success = bulk.TryGetProperty("Success", out var successElement) && successElement.GetBoolean();
+            var message = bulk.TryGetProperty("Message", out var messageElement)
+                ? messageElement.GetString() ?? string.Empty
+                : string.Empty;
+            var affected = bulk.TryGetProperty("AffectedCount", out var affectedElement)
+                ? affectedElement.GetInt32()
+                : 0;
+            var dryRun = bulk.TryGetProperty("DryRun", out var dryRunElement) && dryRunElement.GetBoolean();
+
+            return string.Join(Environment.NewLine,
+            [
+                "## Bulk Triage Result",
+                string.Empty,
+                $"- Success: **{success}**",
+                $"- Dry Run: **{dryRun}**",
+                $"- Affected Findings: **{affected}**",
+                $"- Message: {EscapeMarkdown(message)}",
+                string.Empty,
+                dryRun
+                    ? "**Next action:** Reply with `bulk_decide` and `dryRun=false` to persist the same decision."
+                    : "**Next action:** Reply with `status` to review updated triage posture.",
                 "Then pause for user input."
             ]);
         }

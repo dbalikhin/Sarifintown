@@ -140,6 +140,67 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        [Test]
+        public async Task ManageTriage_WithDecideAndBulkActions_ReturnsMarkdownSummaries()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "facade-decide-bulk.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-FACADE-DECIDE",
+                      "level": "error",
+                      "message": { "text": "triage me" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/Facade.cs" },
+                            "region": { "startLine": 9 }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var listJson = await SarifTools.TriageList(limit: 1);
+                var listPayload = JsonSerializer.Deserialize<List<JsonElement>>(listJson);
+                var findingId = listPayload![0].GetProperty("FindingId").GetString();
+
+                var decideResult = await SarifTools.manage_triage("decide", findingId!, state: "TP", reason: "validated");
+                var decideText = decideResult.Content[0] as TextContentBlock;
+
+                Assert.That(decideText, Is.Not.Null);
+                Assert.That(decideText!.Text, Contains.Substring("## Triage Decision Result"));
+                Assert.That(decideText.Text, Does.Not.Contain("```json"));
+
+                var bulkResult = await SarifTools.manage_triage("bulk_decide", state: "FP", reason: "bulk-noise", filters: "{\"rule\":\"RULE-FACADE-DECIDE\",\"dryRun\":true}");
+                var bulkText = bulkResult.Content[0] as TextContentBlock;
+
+                Assert.That(bulkText, Is.Not.Null);
+                Assert.That(bulkText!.Text, Contains.Substring("## Bulk Triage Result"));
+                Assert.That(bulkText.Text, Does.Not.Contain("```json"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
         [TestCase("true positive", "TP")]
         [TestCase("false positive", "FP")]
         public async Task Triage_WithNaturalLanguageState_MapsToExpectedState(string inputState, string expectedState)
@@ -1024,7 +1085,8 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(textBlock, Is.Not.Null);
                 Assert.That(textBlock!.Text, Does.Not.Contain("Dummy payload"));
-                Assert.That(textBlock.Text, Contains.Substring("TotalFindings"));
+                Assert.That(textBlock.Text, Contains.Substring("## SARIF Triage Status"));
+                Assert.That(textBlock.Text, Does.Not.Contain("```json"));
             }
             finally
             {
