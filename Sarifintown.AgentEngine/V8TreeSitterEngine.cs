@@ -2,11 +2,14 @@
 using Microsoft.ClearScript.JavaScript;
 using Microsoft.ClearScript.V8;
 using Sarifintown.Core;
+using System.Collections.Concurrent;
+using System.Threading;
 
 public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
 {
     private readonly V8ScriptEngine _engine;
-    private readonly Dictionary<string, byte[]> _languageWasmCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte[]> _languageWasmCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _engineGate = new(1, 1);
 
     public V8TreeSitterEngine()
     {
@@ -53,9 +56,19 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
         // 4. Properly AWAIT the JS Promise so initialization completes before parsing
         var initPromise = _engine.Evaluate("initTreeSitter()");
         await ((ScriptObject)initPromise).ToTask();
+
+        // 5. Force WASM compilation for C# grammar by parsing a tiny dummy string
+        try
+        {
+            await ExtractMethodAsync("int x = 1;", "csharp", 1, 1).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Ignore errors during warmup
+        }
     }
 
-    public async Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
+    public async Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(sourceCode))
         {
@@ -73,99 +86,106 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
 
         if (!_languageWasmCache.TryGetValue(normalizedLanguage, out var wasmBytes))
         {
-            wasmBytes = await File.ReadAllBytesAsync(wasmPath);
-            _languageWasmCache[normalizedLanguage] = wasmBytes;
+            wasmBytes = await File.ReadAllBytesAsync(wasmPath, cancellationToken);
+            _languageWasmCache.TryAdd(normalizedLanguage, wasmBytes);
         }
 
         var targetStartLine = Math.Max(0, startLine);
         var targetEndLine = Math.Max(targetStartLine, endLine);
 
-        _engine.Script.sourceCode = sourceCode;
-        _engine.Script.wasmBytes = wasmBytes;
-        _engine.Script.targetStartLine = targetStartLine;
-        _engine.Script.targetEndLine = targetEndLine;
+        await _engineGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _engine.Script.sourceCode = sourceCode;
+            _engine.Script.wasmBytes = wasmBytes;
+            _engine.Script.targetStartLine = targetStartLine;
+            _engine.Script.targetEndLine = targetEndLine;
 
-        var promise = _engine.Evaluate(@"
-            (async () => {
-                try {
-                    const wasmArray = new Uint8Array(wasmBytes.Length);
-                    for (let i = 0; i < wasmBytes.Length; i++) {
-                        wasmArray[i] = wasmBytes[i];
-                    }
-                    
-                    const lang = await TreeSitter.Language.load(wasmArray);
-                    parser.setLanguage(lang);
+            var promise = _engine.Evaluate(@"
+                (async () => {
+                    try {
+                        const wasmArray = new Uint8Array(wasmBytes.Length);
+                        for (let i = 0; i < wasmBytes.Length; i++) {
+                            wasmArray[i] = wasmBytes[i];
+                        }
+                        
+                        const lang = await TreeSitter.Language.load(wasmArray);
+                        parser.setLanguage(lang);
 
-                    const tree = parser.parse(sourceCode);
+                        const tree = parser.parse(sourceCode);
 
-                    const methodNodeTypes = new Set([
-                        'method_declaration',
-                        'function_declaration',
-                        'method_definition',
-                        'function_definition',
-                        'constructor_declaration',
-                        'arrow_function',
-                        'lambda_expression',
-                        'function_item',
-                        'function_expression',
-                        'function_signature_item',
-                        'function',
-                        'local_function_statement'
-                    ]);
+                        const methodNodeTypes = new Set([
+                            'method_declaration',
+                            'function_declaration',
+                            'method_definition',
+                            'function_definition',
+                            'constructor_declaration',
+                            'arrow_function',
+                            'lambda_expression',
+                            'function_item',
+                            'function_expression',
+                            'function_signature_item',
+                            'function',
+                            'local_function_statement'
+                        ]);
 
-                    const findMethodForLine = (node, targetLine) => {
-                        if (!node) {
+                        const findMethodForLine = (node, targetLine) => {
+                            if (!node) {
+                                return null;
+                            }
+
+                            if (methodNodeTypes.has(node.type)
+                                && node.startPosition.row <= targetLine
+                                && node.endPosition.row >= targetLine) {
+                                return node;
+                            }
+
+                            for (let i = 0; i < node.namedChildCount; i++) {
+                                const child = node.namedChild(i);
+                                if (!child) {
+                                    continue;
+                                }
+
+                                if (targetLine < child.startPosition.row || targetLine > child.endPosition.row) {
+                                    continue;
+                                }
+
+                                const found = findMethodForLine(child, targetLine);
+                                if (found) {
+                                    return found;
+                                }
+                            }
+
                             return null;
+                        };
+
+                        let node = findMethodForLine(tree.rootNode, targetStartLine);
+                        if (!node && targetEndLine !== targetStartLine) {
+                            node = findMethodForLine(tree.rootNode, targetEndLine);
                         }
 
-                        if (methodNodeTypes.has(node.type)
-                            && node.startPosition.row <= targetLine
-                            && node.endPosition.row >= targetLine) {
-                            return node;
+                        while (node && !methodNodeTypes.has(node.type)) {
+                            node = node.parent;
                         }
 
-                        for (let i = 0; i < node.namedChildCount; i++) {
-                            const child = node.namedChild(i);
-                            if (!child) {
-                                continue;
-                            }
-
-                            if (targetLine < child.startPosition.row || targetLine > child.endPosition.row) {
-                                continue;
-                            }
-
-                            const found = findMethodForLine(child, targetLine);
-                            if (found) {
-                                return found;
-                            }
+                        if (!node) {
+                            return '';
                         }
 
-                        return null;
-                    };
-
-                    let node = findMethodForLine(tree.rootNode, targetStartLine);
-                    if (!node && targetEndLine !== targetStartLine) {
-                        node = findMethodForLine(tree.rootNode, targetEndLine);
+                        return sourceCode.substring(node.startIndex, node.endIndex);
+                    } catch (e) {
+                        return 'ERROR: ' + e.toString();
                     }
+                })()
+            ");
 
-                    while (node && !methodNodeTypes.has(node.type)) {
-                        node = node.parent;
-                    }
-
-                    if (!node) {
-                        return '';
-                    }
-
-                    return sourceCode.substring(node.startIndex, node.endIndex);
-                } catch (e) {
-                    return 'ERROR: ' + e.toString();
-                }
-            })()
-        ");
-
-        // Properly cast and await the result
-        string result = (string)await ((ScriptObject)promise).ToTask();
-        return result;
+            string result = (string)await ((ScriptObject)promise).ToTask().ConfigureAwait(false);
+            return result;
+        }
+        finally
+        {
+            _engineGate.Release();
+        }
     }
 
     private static string NormalizeLanguage(string language)
@@ -182,5 +202,9 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
         };
     }
 
-    public void Dispose() => _engine.Dispose();
+    public void Dispose()
+    {
+        _engineGate.Dispose();
+        _engine.Dispose();
+    }
 }

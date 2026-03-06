@@ -100,10 +100,9 @@ namespace Sarifintown.AgentEngine.Tests
 
             public Task InitializeAsync() => Task.CompletedTask;
 
-            public Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
+            public Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine, CancellationToken cancellationToken = default)
             {
-                Interlocked.Increment(ref _extractMethodCallCount);
-                return Task.FromResult("extracted_code_snippet");
+                return Task.FromResult($"Extracted: {language} from {startLine} to {endLine}");
             }
         }
 

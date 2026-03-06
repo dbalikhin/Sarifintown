@@ -46,90 +46,20 @@ internal sealed class SnippetWarmupService : BackgroundService
 
     internal ValueTask QueueFindingsAsync(IEnumerable<string> findingIds, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(findingIds);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        foreach (var findingId in findingIds)
-        {
-            if (string.IsNullOrWhiteSpace(findingId))
-            {
-                continue;
-            }
-
-            var shouldQueue = false;
-            lock (_queueLock)
-            {
-                shouldQueue = _queuedFindingIds.Add(findingId);
-            }
-
-            if (shouldQueue)
-            {
-                if (!_findingQueue.Writer.TryWrite(findingId))
-                {
-                    lock (_queueLock)
-                    {
-                        _queuedFindingIds.Remove(findingId);
-                    }
-                }
-            }
-        }
-
+        // Abandoned. Queue logic is bypassed to prevent V8 concurrency deadlocks.
         return ValueTask.CompletedTask;
     }
 
-    internal async Task PreloadSnippetsAsync(int maxFindings, CancellationToken cancellationToken)
+    internal Task PreloadSnippetsAsync(int maxFindings, CancellationToken cancellationToken)
     {
-        if (maxFindings <= 0)
-        {
-            return;
-        }
-
-        var findings = await _stateService.GetFindingsAsync(cancellationToken).ConfigureAwait(false);
-        var candidates = findings
-            .OrderByDescending(finding => finding.PriorityScore)
-            .ThenBy(finding => finding.FindingId, StringComparer.Ordinal)
-            .Take(maxFindings)
-            .ToList();
-
-        foreach (var finding in candidates)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await WarmFindingAsync(finding, cancellationToken).ConfigureAwait(false);
-        }
+        // Abandoned. V8 compiles lazily through InitializeAsync instead of looping through files.
+        return Task.CompletedTask;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await foreach (var findingId in _findingQueue.Reader.ReadAllAsync(stoppingToken))
-        {
-            try
-            {
-                await WarmFindingAsync(findingId, stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (InvalidOperationException exception)
-            {
-                _logger.LogWarning(exception, "Snippet warmup skipped for finding {FindingId} due to invalid state.", findingId);
-            }
-            catch (IOException exception)
-            {
-                _logger.LogWarning(exception, "Snippet warmup skipped for finding {FindingId} due to I/O failure.", findingId);
-            }
-            catch (UnauthorizedAccessException exception)
-            {
-                _logger.LogWarning(exception, "Snippet warmup skipped for finding {FindingId} due to access restrictions.", findingId);
-            }
-            finally
-            {
-                lock (_queueLock)
-                {
-                    _queuedFindingIds.Remove(findingId);
-                }
-            }
-        }
+        // Background thread warmup logic is removed to prevent V8 concurrency deadlocks.
+        return Task.CompletedTask;
     }
 
     private async Task WarmFindingAsync(string findingId, CancellationToken cancellationToken)
