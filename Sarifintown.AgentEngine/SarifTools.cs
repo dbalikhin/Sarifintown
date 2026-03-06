@@ -1,10 +1,14 @@
 ﻿using ModelContextProtocol.Server;
+using ModelContextProtocol.Protocol;
+using Microsoft.Extensions.Options;
 using Sarifintown.Core;
+using Sarifintown.AgentEngine.Configuration;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Sarifintown.AgentEngine
 {
@@ -14,10 +18,18 @@ namespace Sarifintown.AgentEngine
         // Dependencies to be injected at startup in Program.cs
         public static IFileReader? FileReader { get; set; }
         public static ITreeSitterEngine? TreeSitterEngine { get; set; }
+        internal static SarifStateService? StateService { get; set; }
+        internal static SnippetCacheService? SnippetCache { get; set; }
+        internal static SnippetWarmupService? SnippetWarmupService { get; set; }
         private static readonly object SyncRoot = new();
+        public const string StateContextDelimiter = "===SARIF_STATE_CONTEXT===";
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
         private static string _workspaceRoot = Directory.GetCurrentDirectory();
+        private static ActiveScopeFilter _activeScope = new();
+        private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
+        private static int _nextDisplayId = 1;
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -108,242 +120,69 @@ namespace Sarifintown.AgentEngine
             lock (SyncRoot)
             {
                 _workspaceRoot = Path.GetFullPath(workspaceRoot);
+                _activeScope = new ActiveScopeFilter();
+                DisplayIdToFindingId.Clear();
+                FindingIdToDisplayId.Clear();
+                _nextDisplayId = 1;
             }
         }
 
-        [McpServerTool]
-        [Description("MUST: Call this tool first to enumerate SARIF files discovered at server startup before any SARIF-path-dependent operation.")]
-        public static string ListWorkspaceSarifFiles()
-        {
-            List<string> files;
-            lock (SyncRoot)
-            {
-                files = _discoveredSarifFiles.ToList();
-            }
-
-            var payload = files.Select(path => new
-            {
-                name = Path.GetFileName(path),
-                path
-            });
-
-            return JsonSerializer.Serialize(payload);
-        }
-
-        [McpServerTool]
-        [Description("MUST: Use this tool to obtain authoritative triage posture from loaded SARIF findings and local .sarif/triage.json state.")]
-        public static async Task<string> TriageStatus()
-        {
-            var workflow = CreateTriageWorkflowService();
-            var status = await workflow.GetStatusAsync();
-            return JsonSerializer.Serialize(status);
-        }
-
-        [McpServerTool]
-        [Description("MUST: Start autonomous triage flow with this guided tool. Render markdown verbatim, then follow next_step; do not use terminal commands for SARIF-domain actions.")]
-        public static async Task<string> TriageStatusGuided()
-        {
-            var workflow = CreateTriageWorkflowService();
-            var status = await workflow.GetStatusAsync();
-
-            var markdown = $"""
-            ## SARIF Triage Status
-
-            - Total findings: **{status.TotalFindings}**
-            - Open findings: **{status.OpenCount}**
-            - Triaged findings: **{status.TriagedCount}**
-            - True positives: **{status.TruePositiveCount}**
-            - False positives: **{status.FalsePositiveCount}**
-
-            **Next action:** Reply with `list` to review prioritized findings.
-            """;
-
-            return CreateGuidedResponse(
-                workflowName: "triage-status",
-                data: status,
-                markdown: markdown,
-                nextTool: "TriageListGuided",
-                nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
-                pauseForUserInput: true,
-                pausePrompt: "Reply with `list` to continue to prioritized findings.");
-        }
-
-        [McpServerTool]
-        [Description("MUST: Use this tool to retrieve prioritized findings with filters; do not infer finding sets without calling it.")]
-        public static async Task<string> TriageList(
-            [Description("Optional severity filter (for example: High, Medium, Low).")]
-            string severity = "",
-            [Description("Optional rule-id or rule-name filter.")]
-            string rule = "",
-            [Description("Optional file path filter (supports wildcard patterns handled by workflow service).")]
-            string file = "",
-            [Description("Optional triage state filter (Open, TP, FP).")]
-            string state = "",
+        [McpServerTool(Name = "sarif_get")]
+        [Description("Retrieves prioritized SARIF findings, manages persistent Active Scope, and returns scope metrics.")]
+        public static async Task<CallToolResult> SarifGet(
+            [Description("Scope action: keep, set, refine, or clear.")]
+            string scope = "keep",
+            [Description("Filter expression, for example: severity:high, rule:SQLI.")]
+            string filter = "",
+            [Description("When true, attach evidence blocks per finding.")]
+            bool includeEvidence = false,
             [Description("Maximum findings to return.")]
             int limit = 10)
         {
-            var workflow = CreateTriageWorkflowService();
-            var findings = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit));
-            return JsonSerializer.Serialize(findings);
-        }
-
-        [McpServerTool]
-        [Description("MUST: Use this guided listing tool for autonomous chaining; response includes enforced next_step and pause directives.")]
-        public static async Task<string> TriageListGuided(
-            [Description("Optional severity filter (for example: High, Medium, Low).")]
-            string severity = "",
-            [Description("Optional rule-id or rule-name filter.")]
-            string rule = "",
-            [Description("Optional file path filter.")]
-            string file = "",
-            [Description("Optional triage state filter (Open, TP, FP).")]
-            string state = "",
-            [Description("Maximum findings to return.")]
-            int limit = 10)
-        {
-            var workflow = CreateTriageWorkflowService();
-            var findings = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit));
-
-            var markdown = BuildGuidedFindingsMarkdown(findings);
-            return CreateGuidedResponse(
-                workflowName: "triage-list",
-                data: findings,
-                markdown: markdown,
-                nextTool: "TriageInspectGuided",
-                nextToolArguments: new { findingId = "<reply-with-finding-id>", evidenceMode = "line-window-concatenated" },
-                pauseForUserInput: true,
-                pausePrompt: "Reply with a FindingId from the table to inspect technical evidence.");
-        }
-
-        [McpServerTool]
-        [Description("Use this query-named alias when the MCP client requires query-style tool naming; behavior matches TriageList.")]
-        public static Task<string> TriageQuery(
-            [Description("Optional severity filter.")]
-            string severity = "",
-            [Description("Optional rule-id or rule-name filter.")]
-            string rule = "",
-            [Description("Optional file path filter.")]
-            string file = "",
-            [Description("Optional triage state filter.")]
-            string state = "",
-            [Description("Maximum findings to return.")]
-            int limit = 10)
-        {
-            return TriageList(severity, rule, file, state, limit);
-        }
-
-        [McpServerTool]
-        [Description("MUST: Use this tool for authoritative technical evidence of one finding, including ordered data-flow and snippets.")]
-        public static async Task<string> TriageInspect(
-            [Description("Finding identifier returned by TriageList or TriageListGuided.")]
-            string findingId,
-            [Description("Optional evidence mode override (for example: line-window-strict, line-window-concatenated, tree-sitter-method).")]
-            string evidenceMode = "")
-        {
-            var workflow = CreateTriageWorkflowService();
-            var inspect = await workflow.InspectAsync(findingId, evidenceMode);
-
-            if (inspect == null)
+            var payload = await ExecuteScopedGetAsync(scope, filter, includeEvidence, limit);
+            var stateContext = new
             {
-                return JsonSerializer.Serialize(new
+                context = new
                 {
-                    success = false,
-                    message = $"Finding not found: {findingId}"
-                });
-            }
+                    active_scope = payload.Context.ActiveScope,
+                    metrics = new
+                    {
+                        total_in_scope = payload.Context.Metrics.TotalInScope,
+                        returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
+                        remaining_in_scope = payload.Context.Metrics.RemainingInScope
+                    },
+                    aliases = payload.Findings
+                        .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
+                        .ToArray()
+                }
+            };
 
-            return JsonSerializer.Serialize(inspect);
+            return CreateDualPurposeResult(
+                markdown: BuildScopedGetMarkdown(payload),
+                systemStateContext: stateContext,
+                resourceUri: BuildUiResourceUri("triage", "sarif_get", string.Empty),
+                additionalMeta: BuildScopedMeta(payload));
         }
 
-        [McpServerTool]
-        [Description("MUST: Use this guided inspection tool in autonomous workflows. Render markdown verbatim and execute explicit next_step triage action.")]
-        public static async Task<string> TriageInspectGuided(
-            [Description("Finding identifier returned by guided list output.")]
-            string findingId,
-            [Description("Optional evidence mode override.")]
-            string evidenceMode = "")
-        {
-            var workflow = CreateTriageWorkflowService();
-            var inspect = await workflow.InspectAsync(findingId, evidenceMode);
-
-            if (inspect == null)
-            {
-                var notFoundMarkdown = $"""
-                ## Finding Not Found
-
-                No finding matched `{findingId}`.
-
-                **Next action:** Run a filtered list again and select a valid FindingId.
-                """;
-
-                return CreateGuidedResponse(
-                    workflowName: "triage-inspect",
-                    data: new { success = false, message = $"Finding not found: {findingId}" },
-                    markdown: notFoundMarkdown,
-                    nextTool: "TriageListGuided",
-                    nextToolArguments: new { severity = "", rule = "", file = "", state = "", limit = 10 },
-                    pauseForUserInput: true,
-                    pausePrompt: "Reply with `list` to load findings, then provide a valid FindingId.");
-            }
-
-            var markdown = BuildGuidedInspectMarkdown(inspect);
-            return CreateGuidedResponse(
-                workflowName: "triage-inspect",
-                data: inspect,
-                markdown: markdown,
-                nextTool: "Triage",
-                nextToolArguments: new { findingId = inspect.FindingId, state = "TP|FP", reason = "<required>", author = "AI" },
-                pauseForUserInput: true,
-                pausePrompt: "Reply with `TP <reason>` or `FP <reason>` to record a triage decision.");
-        }
-
-        [McpServerTool]
-        [Description("MUST: Use this tool to persist a TP/FP triage decision for one finding into .sarif/triage.json.")]
-        public static async Task<string> Triage(
-            [Description("Target finding identifier.")]
-            string findingId,
-            [Description("Decision state to persist (TP or FP; natural-language aliases are normalized by workflow service).")]
+        [McpServerTool(Name = "sarif_triage")]
+        [Description("Applies TP/FP decisions to a target finding, list of findings, or current Active Scope.")]
+        public static async Task<CallToolResult> SarifTriage(
+            [Description("Decision state: confirmed, false_positive, test_code, wont_fix, or mitigated.")]
             string state,
-            [Description("Required reason for the decision.")]
+            [Description("Decision reason/audit note.")]
             string reason,
-            [Description("Decision author label.")]
-            string author = "AI")
+            [Description("Target displayid (for example 1), CSV displayid list (1,2,3), or literal scope.")]
+            string target)
         {
-            var workflow = CreateTriageWorkflowService();
-            var result = await workflow.TriageAsync(findingId, state, reason, author);
-            return JsonSerializer.Serialize(result);
+            var payload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
+
+            return CreateDualPurposeResult(
+                markdown: BuildScopedTriageMarkdown(payload),
+                systemStateContext: null,
+                resourceUri: BuildUiResourceUri("triage", "sarif_triage", string.Empty),
+                additionalMeta: null);
         }
 
-        [McpServerTool]
-        [Description("MUST: Use this tool for bulk TP/FP triage updates using filters. At least one of severity/rule/file is required.")]
-        public static async Task<string> TriageBulk(
-            [Description("Decision state to apply (TP or FP).")]
-            string state,
-            [Description("Required reason applied to affected findings.")]
-            string reason,
-            [Description("Optional severity filter.")]
-            string severity = "",
-            [Description("Optional rule filter.")]
-            string rule = "",
-            [Description("Optional file filter.")]
-            string file = "",
-            [Description("When true, preview affected findings without persisting changes.")]
-            bool dryRun = false,
-            [Description("Decision author label.")]
-            string author = "AI")
-        {
-            var workflow = CreateTriageWorkflowService();
-            var result = await workflow.TriageBulkAsync(
-                state,
-                reason,
-                new TriageQueryOptions(severity, rule, file, string.Empty, int.MaxValue),
-                dryRun,
-                author);
-
-            return JsonSerializer.Serialize(result);
-        }
-
-        [McpServerTool]
         [Description("MUST: Use this tool to resolve the correct interactive surface for the connected host before launching UI/TUI experiences.")]
         public static string ResolveInteractiveSurface(
             [Description("Active MCP server instance; used for host detection.")]
@@ -388,7 +227,7 @@ namespace Sarifintown.AgentEngine
                 if (selectedAction.StartsWith("Triage ", StringComparison.Ordinal))
                 {
                     commandResult = SpectreCliMenu
-                        .ExecuteTriageActionAsync(CreateTriageWorkflowService(), selectedAction)
+                        .ExecuteTriageActionAsync(selectedAction)
                         .GetAwaiter()
                         .GetResult();
                 }
@@ -411,317 +250,554 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        [McpServerTool]
-        [Description("MUST: Use this tool to parse a SARIF file and apply category/severity/rule filters. Do not infer filtered issues without this call.")]
-        public static async Task<string> LoadAndFilterSarif(
-            [Description("SARIF file path (absolute or filename discovered at startup).")]
-            string sarifPath,
-            [Description("Optional severity filter.")]
-            string severity = "",
-            [Description("Optional rule-id filter.")]
-            string ruleId = "",
-            [Description("Optional category keyword filter matched against message and rule id.")]
-            string category = "")
+        private static async Task<ScopedGetPayload> ExecuteScopedGetAsync(string scope, string filter, bool includeEvidence, int limit)
         {
-            if (FileReader == null) throw new InvalidOperationException("FileReader is not initialized.");
+            var scopeAction = ParseScopeAction(scope);
+            var parsedFilter = string.IsNullOrWhiteSpace(filter)
+                ? new ActiveScopeFilter()
+                : ParseScopeFilter(filter);
 
-            var resolvedSarifPath = ResolveSarifPath(sarifPath);
-
-            if (!File.Exists(resolvedSarifPath))
-                return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
-
-            try
+            if (scopeAction is ScopeAction.Set or ScopeAction.Refine && parsedFilter.IsEmpty)
             {
-                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
-                var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                if (sarifLog?.Runs == null || !sarifLog.Runs.Any())
-                    return JsonSerializer.Serialize(new { error = "Invalid or empty SARIF file." });
-
-                var results = sarifLog.Runs.SelectMany(r => r.Results ?? Enumerable.Empty<Result>()).ToList();
-
-                // Apply Filters
-                if (!string.IsNullOrWhiteSpace(severity))
-                    results = results.Where(r => string.Equals(r.Level, severity, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                if (!string.IsNullOrWhiteSpace(ruleId))
-                    results = results.Where(r => string.Equals(r.RuleId, ruleId, StringComparison.OrdinalIgnoreCase)).ToList();
-
-                if (!string.IsNullOrWhiteSpace(category))
-                    results = results.Where(r => r.Message?.Text?.Contains(category, StringComparison.OrdinalIgnoreCase) == true ||
-                                                 r.RuleId?.Contains(category, StringComparison.OrdinalIgnoreCase) == true).ToList();
-
-                var simplifiedResults = results.Select((r, index) => new
-                {
-                    result_id = index.ToString(),
-                    rule_id = r.RuleId,
-                    level = r.Level ?? "warning",
-                    message = r.Message?.Text,
-                    location = r.Locations?.FirstOrDefault()?.PhysicalLocation?.ArtifactLocation?.Uri
-                });
-
-                return JsonSerializer.Serialize(simplifiedResults);
+                throw new ArgumentException("filter is required when scope is set or refine.", nameof(filter));
             }
-            catch (Exception ex)
+
+            var activeScope = GetActiveScope();
+
+            switch (scopeAction)
             {
-                return JsonSerializer.Serialize(new { error = $"Failed to parse SARIF: {ex.Message}" });
+                case ScopeAction.Set:
+                    activeScope = parsedFilter;
+                    SetActiveScope(activeScope);
+                    break;
+                case ScopeAction.Refine:
+                    activeScope = MergeScope(activeScope, parsedFilter);
+                    SetActiveScope(activeScope);
+                    break;
+                case ScopeAction.Clear:
+                    activeScope = new ActiveScopeFilter();
+                    SetActiveScope(activeScope);
+                    break;
             }
-        }
 
-        [McpServerTool]
-        [Description("MUST: Use this tool to extract source-to-sink data flow for a SARIF issue using Tree-sitter and fallback snippet windows.")]
-        public static async Task<string> ExtractCodeFlow(
-            [Description("SARIF file path (absolute or filename discovered at startup).")]
-            string sarifPath,
-            [Description("Result index from flattened SARIF results.")]
-            string resultId,
-            [Description("Workspace source-code root used to resolve artifact paths.")]
-            string sourceCodeRoot)
-        {
-            if (FileReader == null || TreeSitterEngine == null)
-                throw new InvalidOperationException("Core engines are not initialized.");
+            var executionScope = scopeAction == ScopeAction.Keep && !parsedFilter.IsEmpty
+                ? MergeScope(activeScope, parsedFilter)
+                : activeScope;
 
-            var resolvedSarifPath = ResolveSarifPath(sarifPath);
+            var workflow = CreateTriageWorkflowService();
+            var batchLimit = limit <= 0 ? 10 : limit;
 
-            try
+            var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
+            var executionFindings = await workflow.ListAsync(executionScope.ToQueryOptions(batchLimit));
+
+            var findingRows = new List<ScopedFinding>(executionFindings.Count);
+            foreach (var finding in executionFindings)
             {
-                if (!File.Exists(resolvedSarifPath))
-                    return JsonSerializer.Serialize(new { error = $"File not found: {sarifPath}" });
-
-                var content = await FileReader.ReadFileAsync(resolvedSarifPath);
-                var sarifLog = JsonSerializer.Deserialize<SarifLog>(content, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                var flattenedResults = sarifLog?.Runs
-                    .SelectMany(run => (run.Results ?? Enumerable.Empty<Result>()).Select(result => (run, result)))
-                    .ToList();
-
-                if (flattenedResults == null || !int.TryParse(resultId, out int index) || index < 0 || index >= flattenedResults.Count)
-                    return JsonSerializer.Serialize(new { error = "Invalid resultId or result not found." });
-
-                var targetPair = flattenedResults[index];
-                var targetResult = targetPair.result;
-                var targetRun = targetPair.run;
-
-                if (targetResult.CodeFlows == null || !targetResult.CodeFlows.Any())
-                    return JsonSerializer.Serialize(new { message = "No code flow trace is available in the SARIF log for this issue." });
-
-                var flowSteps = new List<object>();
-                var threadFlows = targetResult.CodeFlows.SelectMany(cf => cf.ThreadFlows).ToList();
-
-                foreach (var threadFlow in threadFlows)
+                var displayId = GetOrCreateDisplayId(finding.FindingId);
+                TriageInspectResult? evidence = null;
+                if (includeEvidence)
                 {
-                    foreach (var location in threadFlow.Locations)
-                    {
-                        var physLoc = location.Location?.PhysicalLocation;
-                        if (physLoc == null) continue;
-
-                        var relativePath = physLoc.ArtifactLocation?.Uri;
-                        if (string.IsNullOrEmpty(relativePath)) continue;
-
-                        var fullPath = FileHelper.ResolvePathForWorkspace(physLoc.ArtifactLocation, targetRun, sourceCodeRoot);
-
-                        string snippetCode = "Source file unavailable";
-
-                        string? sourceCode = null;
-                        try
-                        {
-                            sourceCode = await FileReader.ReadFileAsync(fullPath);
-                        }
-                        catch (IOException)
-                        {
-                            sourceCode = null;
-                        }
-                        catch (UnauthorizedAccessException)
-                        {
-                            sourceCode = null;
-                        }
-                        if (!string.IsNullOrWhiteSpace(sourceCode))
-                        {
-                            var language = GetLanguageFromExtension(Path.GetExtension(fullPath));
-
-                            var windowStartLine = physLoc.Region?.StartLine ?? 1;
-                            var windowEndLine = physLoc.Region?.EndLine > 0
-                                ? physLoc.Region.EndLine
-                                : windowStartLine;
-
-                            if (!string.IsNullOrWhiteSpace(language))
-                            {
-                                var startLine = Math.Max(0, windowStartLine - 1);
-                                var endLine = Math.Max(startLine, windowEndLine - 1);
-                                snippetCode = await TreeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
-                            }
-
-                            if (string.IsNullOrWhiteSpace(snippetCode)
-                                || snippetCode.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                snippetCode = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
-                            }
-                        }
-
-                        flowSteps.Add(new
-                        {
-                            file_path = relativePath,
-                            start_line = physLoc.Region?.StartLine,
-                            message = location.Location?.Message?.Text,
-                            code_snippet = snippetCode.Trim()
-                        });
-                    }
+                    evidence = await workflow.InspectAsync(finding.FindingId, string.Empty);
                 }
 
-                return JsonSerializer.Serialize(new
-                {
-                    rule_id = targetResult.RuleId,
-                    flow_steps = flowSteps
-                });
+                findingRows.Add(new ScopedFinding(
+                    displayId,
+                    finding.FindingId,
+                    finding.Severity,
+                    finding.State,
+                    finding.RuleName,
+                    evidence?.Message ?? finding.RuleName,
+                    new ScopedLocation(finding.FilePath, finding.LineNumber),
+                    evidence));
             }
-            catch (Exception ex)
-            {
-                return JsonSerializer.Serialize(new { error = $"Failed to extract code flow: {ex.Message}" });
-            }
+
+            var metrics = new SarifGetMetrics(
+                activeScopeFindings.Count,
+                findingRows.Count,
+                activeScopeFindings.Count(item => string.Equals(item.State, TriageFindingState.Open.ToString(), StringComparison.OrdinalIgnoreCase)));
+
+            return new ScopedGetPayload(
+                new ScopedContext(
+                    "Results are filtered by the persistent Active Scope.",
+                    ToScopeDictionary(activeScope),
+                    new ScopedMetrics(metrics.TotalInScope, metrics.ReturnedInBatch, metrics.RemainingInScope)),
+                findingRows);
         }
 
-        private static string GetLanguageFromExtension(string extension)
+        private static async Task<ScopedTriagePayload> ExecuteScopedTriageAsync(
+            string state,
+            string reason,
+            string target,
+            string author)
         {
-            return extension.ToLowerInvariant() switch
+            if (string.IsNullOrWhiteSpace(state))
             {
-                ".cs" => "csharp",
-                ".js" => "javascript",
-                ".ts" => "typescript",
-                ".py" => "python",
-                ".java" => "java",
-                ".cpp" => "cpp",
-                ".c" => "c",
-                ".go" => "go",
-                ".rs" => "rust",
-                ".rb" => "ruby",
-                ".php" => "php",
-                ".html" => "html",
-                ".css" => "css",
-                ".json" => "json",
-                ".xml" => "xml",
-                ".yaml" => "yaml",
-                ".yml" => "yaml",
-                ".md" => "markdown",
-                ".sh" => "bash",
-                ".ps1" => "powershell",
-                ".sql" => "sql",
-            _ => string.Empty
+                throw new ArgumentException("state is required.", nameof(state));
+            }
+
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                throw new ArgumentException("reason is required.", nameof(reason));
+            }
+
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                throw new ArgumentException("target is required.", nameof(target));
+            }
+
+            var (requestedState, workflowState) = NormalizeDecisionState(state);
+            var workflow = CreateTriageWorkflowService();
+
+            List<string> targetIds;
+            if (string.Equals(target, "scope", StringComparison.OrdinalIgnoreCase))
+            {
+                var activeScope = GetActiveScope();
+                var scopedFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
+                targetIds = scopedFindings
+                    .Where(item => string.Equals(item.State, TriageFindingState.Open.ToString(), StringComparison.OrdinalIgnoreCase))
+                    .Select(item => item.FindingId)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+            else
+            {
+                targetIds = ResolveFindingIds(target)
+                    .Select(ResolveFindingIdFromAliasOrRaw)
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+
+            var modifiedIds = new List<string>();
+            foreach (var targetId in targetIds)
+            {
+                var decision = await workflow.TriageAsync(targetId, workflowState, reason, author);
+                if (decision.Success)
+                {
+                    modifiedIds.Add(targetId);
+                }
+            }
+
+            return new ScopedTriagePayload(
+                modifiedIds.Count == targetIds.Count,
+                requestedState,
+                reason,
+                target,
+                modifiedIds.Count,
+                modifiedIds,
+                workflowState);
+        }
+
+        private static (string RequestedState, string WorkflowState) NormalizeDecisionState(string state)
+        {
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                throw new ArgumentException("state is required.", nameof(state));
+            }
+
+            var normalized = state.Trim().ToLowerInvariant();
+            return normalized switch
+            {
+                "confirmed" => ("confirmed", "TP"),
+                "false_positive" => ("false_positive", "FP"),
+                "test_code" => ("test_code", "FP"),
+                "wont_fix" => ("wont_fix", "TP"),
+                "mitigated" => ("mitigated", "TP"),
+                _ => throw new ArgumentException("state must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.", nameof(state))
             };
         }
 
-        private static string ResolveSarifPath(string sarifPath)
+        private static ScopeAction ParseScopeAction(string scope)
         {
-            if (Path.IsPathRooted(sarifPath))
+            if (string.IsNullOrWhiteSpace(scope))
             {
-                return sarifPath;
+                return ScopeAction.Keep;
             }
 
+            var normalized = scope.Trim().ToLowerInvariant();
+            return normalized switch
+            {
+                "keep" => ScopeAction.Keep,
+                "set" => ScopeAction.Set,
+                "refine" => ScopeAction.Refine,
+                "clear" => ScopeAction.Clear,
+                _ => throw new ArgumentException("scope must be one of: keep, set, refine, clear.", nameof(scope))
+            };
+        }
+
+        private static ActiveScopeFilter ParseScopeFilter(string filter)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var token in SplitFilterTokens(filter))
+            {
+                var separatorIndex = token.IndexOf(':');
+                if (separatorIndex <= 0 || separatorIndex == token.Length - 1)
+                {
+                    continue;
+                }
+
+                var key = token[..separatorIndex].Trim();
+                var value = token[(separatorIndex + 1)..].Trim().Trim('"', '\'');
+
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                {
+                    map[key] = value;
+                }
+            }
+
+            map.TryGetValue("severity", out var severity);
+            map.TryGetValue("rule", out var rule);
+
+            if (string.IsNullOrWhiteSpace(rule) && map.TryGetValue("ruleId", out var ruleId))
+            {
+                rule = ruleId;
+            }
+
+            map.TryGetValue("file", out var file);
+            if (string.IsNullOrWhiteSpace(file) && map.TryGetValue("path", out var path))
+            {
+                file = path;
+            }
+
+            map.TryGetValue("state", out var state);
+
+            return new ActiveScopeFilter(severity ?? string.Empty, rule ?? string.Empty, file ?? string.Empty, state ?? string.Empty);
+        }
+
+        private static IReadOnlyList<string> SplitFilterTokens(string filter)
+        {
+            if (string.IsNullOrWhiteSpace(filter))
+            {
+                return Array.Empty<string>();
+            }
+
+            var result = new List<string>();
+            var buffer = new System.Text.StringBuilder();
+            var inQuotes = false;
+
+            foreach (var ch in filter)
+            {
+                if (ch == '"')
+                {
+                    inQuotes = !inQuotes;
+                    buffer.Append(ch);
+                    continue;
+                }
+
+                if (ch == ',' && !inQuotes)
+                {
+                    var value = buffer.ToString().Trim();
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        result.Add(value);
+                    }
+
+                    buffer.Clear();
+                    continue;
+                }
+
+                buffer.Append(ch);
+            }
+
+            var trailing = buffer.ToString().Trim();
+            if (!string.IsNullOrWhiteSpace(trailing))
+            {
+                result.Add(trailing);
+            }
+
+            return result;
+        }
+
+        private static ActiveScopeFilter MergeScope(ActiveScopeFilter baseline, ActiveScopeFilter overlay)
+        {
+            return new ActiveScopeFilter(
+                string.IsNullOrWhiteSpace(overlay.Severity) ? baseline.Severity : overlay.Severity,
+                string.IsNullOrWhiteSpace(overlay.Rule) ? baseline.Rule : overlay.Rule,
+                string.IsNullOrWhiteSpace(overlay.File) ? baseline.File : overlay.File,
+                string.IsNullOrWhiteSpace(overlay.State) ? baseline.State : overlay.State);
+        }
+
+        private static ActiveScopeFilter GetActiveScope()
+        {
             lock (SyncRoot)
             {
-                var matchByFullPath = _discoveredSarifFiles.FirstOrDefault(path =>
-                    string.Equals(path, sarifPath, StringComparison.OrdinalIgnoreCase));
+                return _activeScope;
+            }
+        }
 
-                if (!string.IsNullOrWhiteSpace(matchByFullPath))
-                {
-                    return matchByFullPath;
-                }
+        private static void SetActiveScope(ActiveScopeFilter activeScope)
+        {
+            lock (SyncRoot)
+            {
+                _activeScope = activeScope;
+            }
+        }
 
-                var matchByFileName = _discoveredSarifFiles.FirstOrDefault(path =>
-                    string.Equals(Path.GetFileName(path), sarifPath, StringComparison.OrdinalIgnoreCase));
-
-                if (!string.IsNullOrWhiteSpace(matchByFileName))
-                {
-                    return matchByFileName;
-                }
+        private static Dictionary<string, string> ToScopeDictionary(ActiveScopeFilter activeScope)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(activeScope.Severity))
+            {
+                result["severity"] = activeScope.Severity;
             }
 
-            return sarifPath;
+            if (!string.IsNullOrWhiteSpace(activeScope.Rule))
+            {
+                result["rule"] = activeScope.Rule;
+            }
+
+            if (!string.IsNullOrWhiteSpace(activeScope.File))
+            {
+                result["file"] = activeScope.File;
+            }
+
+            if (!string.IsNullOrWhiteSpace(activeScope.State))
+            {
+                result["state"] = activeScope.State;
+            }
+
+            return result;
         }
 
-        private static string CreateGuidedResponse(
-            string workflowName,
-            object data,
+        private static JsonObject BuildScopedMeta(ScopedGetPayload payload)
+        {
+            ArgumentNullException.ThrowIfNull(payload);
+
+            return JsonSerializer.SerializeToNode(new
+            {
+                context = new
+                {
+                    notice = payload.Context.Notice,
+                    active_scope = payload.Context.ActiveScope,
+                    metrics = new
+                    {
+                        total_in_scope = payload.Context.Metrics.TotalInScope,
+                        returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
+                        remaining_in_scope = payload.Context.Metrics.RemainingInScope
+                    },
+                    aliases = payload.Findings
+                        .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
+                        .ToArray()
+                }
+            }) as JsonObject ?? new JsonObject();
+        }
+
+        private static string GetWorkspaceRoot()
+        {
+            lock (SyncRoot)
+            {
+                return _workspaceRoot;
+            }
+        }
+
+        private static CallToolResult CreateDualPurposeResult(
             string markdown,
-            string nextTool,
-            object nextToolArguments,
-            bool pauseForUserInput,
-            string pausePrompt)
+            object? systemStateContext,
+            string resourceUri,
+            JsonObject? additionalMeta = null)
         {
-            return JsonSerializer.Serialize(new
+            var text = markdown?.Trim() ?? string.Empty;
+
+            if (systemStateContext != null)
             {
-                protocol = "sarifintown.guided.v1",
-                workflow = workflowName,
-                llm_directive = "INSTRUCTIONS FOR LLM: Output the following markdown verbatim. Do not summarize or rephrase. After rendering, respect pause.required.",
-                markdown,
-                next_step = new
-                {
-                    tool = nextTool,
-                    arguments = nextToolArguments
-                },
-                pause = new
-                {
-                    required = pauseForUserInput,
-                    prompt = pausePrompt
-                },
-                data
-            });
-        }
+                var contextJson = JsonSerializer.Serialize(systemStateContext);
+                text = $"""
+                {text}
 
-        private static string BuildGuidedFindingsMarkdown(IReadOnlyList<TriageListItem> findings)
-        {
-            if (findings.Count == 0)
-            {
-                return """
-                ## Prioritized Findings
-
-                No findings matched the provided filters.
-
-                **Next action:** Adjust filters and call `TriageListGuided` again.
+                {StateContextDelimiter}
+                {contextJson}
                 """;
             }
 
-            var lines = findings
-                .Select(item => $"| `{EscapeMarkdown(item.FindingId)}` | `{EscapeMarkdown(item.Severity)}` | `{EscapeMarkdown(item.State)}` | `{EscapeMarkdown(item.RuleName)}` | `{EscapeMarkdown(item.FilePath)}`:{item.LineNumber?.ToString() ?? "?"} |")
-                .ToList();
+            if (string.IsNullOrWhiteSpace(resourceUri))
+            {
+                string localUiBaseUrl;
+                lock (SyncRoot)
+                {
+                    localUiBaseUrl = _localUiBaseUrl;
+                }
+
+                if (Uri.TryCreate(localUiBaseUrl, UriKind.Absolute, out var baseUri))
+                {
+                    var builder = new UriBuilder(baseUri)
+                    {
+                        Path = "mcp/dashboard"
+                    };
+
+                    resourceUri = builder.Uri.ToString();
+                }
+            }
+
+            var meta = new JsonObject();
+            if (!string.IsNullOrWhiteSpace(resourceUri))
+            {
+                var csp = BuildUiCsp(resourceUri);
+                meta["ui"] = new JsonObject
+                {
+                    ["resourceUri"] = resourceUri,
+                    ["csp"] = csp
+                };
+            }
+
+            if (additionalMeta != null)
+            {
+                foreach (var property in additionalMeta)
+                {
+                    meta[property.Key] = property.Value?.DeepClone();
+                }
+            }
+
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock
+                    {
+                        Text = text
+                    }
+                },
+                Meta = meta
+            };
+        }
+
+        private static string BuildUiResourceUri(string routePrefix, string action, string id)
+        {
+            var localUi = CreateLocalHttpUiPayload();
+            var uri = GetPropertyValue(localUi, "uri")?.ToString();
+
+            if (!string.IsNullOrWhiteSpace(uri) && Uri.TryCreate(uri, UriKind.Absolute, out var baseUri))
+            {
+                var builder = new UriBuilder(baseUri)
+                {
+                    Path = $"mcp/{routePrefix}/{action}",
+                    Query = string.IsNullOrWhiteSpace(id)
+                        ? string.Empty
+                        : $"id={Uri.EscapeDataString(id)}"
+                };
+
+                return builder.Uri.ToString();
+            }
+
+            return string.Empty;
+        }
+
+        private static string BuildUiCsp(string resourceUri)
+        {
+            if (!Uri.TryCreate(resourceUri, UriKind.Absolute, out var absoluteUri))
+            {
+                return "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self';";
+            }
+
+            var origin = absoluteUri.GetLeftPart(UriPartial.Authority);
+            return $"default-src 'none'; script-src 'self' {origin}; style-src 'self' {origin}; connect-src 'self' {origin}; img-src 'self' data: {origin};";
+        }
+
+        private static string BuildScopedGetMarkdown(ScopedGetPayload payload)
+        {
+            ArgumentNullException.ThrowIfNull(payload);
+            var metrics = payload.Context.Metrics;
+            var findings = payload.Findings;
+
+            var lines = new List<string>
+            {
+                "## SARIF Scoped Query",
+                string.Empty,
+                $"- Total in scope: **{metrics.TotalInScope}**",
+                $"- Returned in batch: **{metrics.ReturnedInBatch}**",
+                $"- Remaining in scope: **{metrics.RemainingInScope}**",
+                string.Empty
+            };
+
+            if (findings.Count == 0)
+            {
+                lines.Add("No findings in current result set.");
+            }
+            else
+            {
+                lines.Add("| Id | Severity | State | Rule | Location |\n|---|---|---|---|---|");
+                foreach (var finding in findings)
+                {
+                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
+                }
+            }
+
+            lines.Add(string.Empty);
+            lines.Add("**Next action:** Use `sarif_triage` with `state`, `reason`, and `target`.");
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private static string BuildScopedTriageMarkdown(ScopedTriagePayload payload)
+        {
+            ArgumentNullException.ThrowIfNull(payload);
 
             return string.Join(Environment.NewLine,
             [
-                "## Prioritized Findings",
+                "## SARIF Scoped Triage",
                 string.Empty,
-                "| FindingId | Severity | State | Rule | Location |",
-                "|---|---|---|---|---|",
-                .. lines,
+                $"- Success: **{payload.Success}**",
+                $"- State: `{EscapeMarkdown(payload.State)}`",
+                $"- Internal workflow state: `{EscapeMarkdown(payload.WorkflowState)}`",
+                $"- Target: `{EscapeMarkdown(payload.Target)}`",
+                $"- Affected findings: **{payload.AffectedCount}**",
                 string.Empty,
-                "**Next action:** Reply with a `FindingId` value to inspect evidence.",
-                "Then pause for user input."
+                "**Next action:** Run `sarif_get` to verify remaining findings in scope."
             ]);
         }
 
-        private static string BuildGuidedInspectMarkdown(TriageInspectResult inspect)
+        private static List<string> ResolveFindingIds(string findingIds)
         {
-            var evidenceRows = inspect.DataFlowEvidenceBlocks
-                .Select(block => $"- Steps {block.StartStepIndex}-{block.EndStepIndex} in `{EscapeMarkdown(block.FilePath)}` ({block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}) via `{EscapeMarkdown(block.Mode)}`")
-                .ToList();
-
-            if (evidenceRows.Count == 0)
+            if (string.IsNullOrWhiteSpace(findingIds))
             {
-                evidenceRows.Add("- No data-flow evidence blocks were produced for this finding.");
+                return new List<string>();
             }
 
-            return string.Join(Environment.NewLine,
-            [
-                "## Finding Inspection",
-                string.Empty,
-                $"- FindingId: `{EscapeMarkdown(inspect.FindingId)}`",
-                $"- Rule: `{EscapeMarkdown(inspect.RuleId)}`",
-                $"- Severity: `{EscapeMarkdown(inspect.Severity)}`",
-                $"- State: `{EscapeMarkdown(inspect.State)}`",
-                string.Empty,
-                "### Evidence Blocks",
-                .. evidenceRows,
-                string.Empty,
-                "**Next action:** Reply with `TP <reason>` or `FP <reason>` to store triage state.",
-                "Then pause for user input."
-            ]);
+            return findingIds
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static string GetOrCreateDisplayId(string findingId)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(findingId);
+
+            lock (SyncRoot)
+            {
+                if (FindingIdToDisplayId.TryGetValue(findingId, out var existingDisplayId))
+                {
+                    return existingDisplayId;
+                }
+
+                var displayId = _nextDisplayId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _nextDisplayId++;
+
+                FindingIdToDisplayId[findingId] = displayId;
+                DisplayIdToFindingId[displayId] = findingId;
+                DisplayIdToFindingId[$"@{displayId}"] = findingId;
+                DisplayIdToFindingId[$"S-{int.Parse(displayId, System.Globalization.CultureInfo.InvariantCulture):00}"] = findingId;
+
+                return displayId;
+            }
+        }
+
+        private static string ResolveFindingIdFromAliasOrRaw(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return string.Empty;
+            }
+
+            var normalized = token.Trim();
+            lock (SyncRoot)
+            {
+                if (DisplayIdToFindingId.TryGetValue(normalized, out var aliasedFindingId))
+                {
+                    return aliasedFindingId;
+                }
+            }
+
+            return normalized;
         }
 
         private static string EscapeMarkdown(string value)
@@ -743,6 +819,9 @@ namespace Sarifintown.AgentEngine
 
             List<string> discoveredFiles;
             string workspaceRoot;
+            var stateService = StateService;
+            var snippetCache = SnippetCache;
+            var snippetWarmupService = SnippetWarmupService;
 
             lock (SyncRoot)
             {
@@ -750,7 +829,26 @@ namespace Sarifintown.AgentEngine
                 workspaceRoot = _workspaceRoot;
             }
 
-            return new TriageWorkflowService(FileReader, TreeSitterEngine, workspaceRoot, discoveredFiles);
+            stateService ??= new SarifStateService(
+                FileReader,
+                Options.Create(new SarifPreloadOptions
+                {
+                    Strategy = PreloadStrategy.LatestPerTool,
+                    EnableSnippetPreload = false,
+                    MaxPreloadedSnippets = 0
+                }),
+                workspaceRoot,
+                discoveredFiles);
+
+            snippetCache ??= new SnippetCacheService();
+
+            return new TriageWorkflowService(
+                FileReader,
+                TreeSitterEngine,
+                stateService,
+                workspaceRoot,
+                snippetCache,
+                snippetWarmupService);
         }
 
         private static string DetectHost(McpServer thisServer, string hostHint)
@@ -962,7 +1060,36 @@ namespace Sarifintown.AgentEngine
             return property.GetValue(instance);
         }
 
-        [McpServerTool]
+        private sealed record ScopedMetrics(int TotalInScope, int ReturnedInBatch, int RemainingInScope);
+
+        private sealed record ScopedContext(
+            string Notice,
+            IReadOnlyDictionary<string, string> ActiveScope,
+            ScopedMetrics Metrics);
+
+        private sealed record ScopedLocation(string File, int? Line);
+
+        private sealed record ScopedFinding(
+            string DisplayId,
+            string FindingId,
+            string Severity,
+            string State,
+            string Rule,
+            string Message,
+            ScopedLocation Location,
+            TriageInspectResult? Evidence);
+
+        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings);
+
+        private sealed record ScopedTriagePayload(
+            bool Success,
+            string State,
+            string Reason,
+            string Target,
+            int AffectedCount,
+            IReadOnlyList<string> ModifiedFindingIds,
+            string WorkflowState);
+
         [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
         public static string GenerateAnalysisReport(
             [Description("Result identifier for report metadata.")]

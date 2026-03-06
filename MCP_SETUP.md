@@ -310,6 +310,35 @@ Use the same server body for both schema styles:
 - macOS/Linux paths: `/...`.
 - Prefer absolute paths for `cwd` and `PROJECT_ROOT`.
 
+### Optional preload and warmup tuning
+
+You can tune SARIF preload behavior and startup snippet warmup directly from MCP client env vars:
+
+- `SARIFINTOWN_Preload__Strategy`: `None`, `LatestPerTool`, or `All`
+- `SARIFINTOWN_Preload__EnableSnippetPreload`: `true`/`false`
+- `SARIFINTOWN_Preload__MaxPreloadedSnippets`: integer
+
+Example (global tool invocation preserved):
+
+```json
+{
+  "servers": {
+    "sarifintown": {
+      "transport": "stdio",
+      "command": "sarifintown",
+      "args": [],
+      "cwd": "C:/dev/sarifintown",
+      "env": {
+        "PROJECT_ROOT": "C:/dev/my-app",
+        "SARIFINTOWN_Preload__Strategy": "LatestPerTool",
+        "SARIFINTOWN_Preload__EnableSnippetPreload": "true",
+        "SARIFINTOWN_Preload__MaxPreloadedSnippets": "50"
+      }
+    }
+  }
+}
+```
+
 ---
 
 ## Quick validation checklist
@@ -447,3 +476,23 @@ Recommended host response:
 - Test the command manually in terminal.
 - Verify .NET SDK is installed.
 - Verify project path is correct.
+
+## Server starts but MCP `initialize` appears stuck
+
+`Sarifintown.Engine` now emits startup diagnostics to **stderr** (MCP console output) so stdio protocol messages on stdout are not polluted.
+
+Typical startup sequence:
+
+1. Workspace discovery (`PROJECT_ROOT` and fallbacks)
+2. Tree-sitter initialization
+3. SARIF state initialization
+4. Optional snippet preload
+5. Web host start + local UI URL resolution
+6. Wait for MCP traffic
+
+If `initialize` stalls, inspect MCP console logs for lines prefixed with `sarifintown-mcp` and look for a `failed after ... ms` message to identify the blocking stage.
+
+If the process crashes before your MCP client can render console output, run the same command directly in a terminal to capture stderr:
+
+- Global tool: `sarifintown`
+- Fallback: `dotnet run --project Sarifintown.AgentEngine/Sarifintown.Engine.csproj`

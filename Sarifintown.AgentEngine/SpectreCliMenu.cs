@@ -1,4 +1,6 @@
 using Spectre.Console;
+using ModelContextProtocol.Protocol;
+using System.Linq;
 using System.Text.Json;
 
 namespace Sarifintown.AgentEngine;
@@ -38,129 +40,130 @@ internal static class SpectreCliMenu
     }
 
     public static async Task<string> ExecuteTriageActionAsync(
-        TriageWorkflowService workflow,
         string action,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(workflow);
-
         return action switch
         {
-            "Triage status" => await RenderStatusAsync(workflow, cancellationToken),
-            "Triage list" => await RenderListAsync(workflow, cancellationToken),
-            "Triage inspect" => await RenderInspectAsync(workflow, cancellationToken),
-            "Triage decision" => await RenderTriageAsync(workflow, cancellationToken),
-            "Triage bulk" => await RenderTriageBulkAsync(workflow, cancellationToken),
+            "Triage status" => await RenderStatusAsync(cancellationToken),
+            "Triage list" => await RenderListAsync(cancellationToken),
+            "Triage decision" => await RenderTriageAsync(cancellationToken),
+            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_triage flow: {action}" }),
             _ => JsonSerializer.Serialize(new { success = false, message = $"Unsupported action: {action}" })
         };
     }
 
-    private static async Task<string> RenderStatusAsync(TriageWorkflowService workflow, CancellationToken cancellationToken)
+    private static async Task<string> RenderStatusAsync(CancellationToken cancellationToken)
     {
-        var status = await workflow.GetStatusAsync(cancellationToken);
-
-        AnsiConsole.MarkupLine($"[green]Total findings:[/] {status.TotalFindings}");
-        AnsiConsole.MarkupLine($"[yellow]Open:[/] {status.OpenCount}  [blue]Triaged:[/] {status.TriagedCount}  [green]TP:[/] {status.TruePositiveCount}  [red]FP:[/] {status.FalsePositiveCount}");
-
-        return JsonSerializer.Serialize(status);
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = await SarifTools.SarifGet(scope: "keep", filter: string.Empty, includeEvidence: false, limit: 10);
+        return RenderDualPurposeText(result);
     }
 
-    private static async Task<string> RenderListAsync(TriageWorkflowService workflow, CancellationToken cancellationToken)
+    private static async Task<string> RenderListAsync(CancellationToken cancellationToken)
     {
-        var severity = AnsiConsole.Ask<string>("Severity filter (optional, CSV):", string.Empty);
-        var rule = AnsiConsole.Ask<string>("Rule filter (optional, CSV):", string.Empty);
-        var file = AnsiConsole.Ask<string>("File filter (optional, wildcard supported):", string.Empty);
-        var state = AnsiConsole.Ask<string>("State filter (optional: Open/TP/FP):", string.Empty);
+        var scope = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("Scope action")
+                .AddChoices("keep", "set", "refine", "clear"));
+        var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high, rule:SQLI):", string.Empty);
+        var includeEvidence = AnsiConsole.Confirm("Include evidence?", false);
         var limit = AnsiConsole.Ask<int>("Limit:", 10);
 
-        var results = await workflow.ListAsync(new TriageQueryOptions(severity, rule, file, state, limit), cancellationToken);
-        var table = new Table().Border(TableBorder.Rounded);
-        table.AddColumn("FindingId");
-        table.AddColumn("Rule");
-        table.AddColumn("File");
-        table.AddColumn("Line");
-        table.AddColumn("Severity");
-        table.AddColumn("State");
-        table.AddColumn("TPS");
-
-        foreach (var item in results)
-        {
-            table.AddRow(
-                item.FindingId,
-                item.RuleName,
-                item.FilePath,
-                item.LineNumber?.ToString() ?? "",
-                item.Severity,
-                item.State,
-                item.PriorityScore.ToString("0.##"));
-        }
-
-        AnsiConsole.Write(table);
-        return JsonSerializer.Serialize(results);
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = await SarifTools.SarifGet(scope, filter, includeEvidence, limit);
+        return RenderDualPurposeText(result);
     }
 
-    private static async Task<string> RenderInspectAsync(TriageWorkflowService workflow, CancellationToken cancellationToken)
-    {
-        var findingId = AnsiConsole.Ask<string>("Finding ID:");
-        var result = await workflow.InspectAsync(findingId, cancellationToken);
-
-        if (result == null)
-        {
-            var errorPayload = new { success = false, message = $"Finding not found: {findingId}" };
-            AnsiConsole.MarkupLine($"[red]{errorPayload.message}[/]");
-            return JsonSerializer.Serialize(errorPayload);
-        }
-
-        AnsiConsole.MarkupLine($"[green]Rule:[/] {result.RuleId} ({result.RuleName})");
-        AnsiConsole.MarkupLine($"[green]Severity:[/] {result.Severity}  [green]State:[/] {result.State}");
-        AnsiConsole.MarkupLine($"[green]Flow steps:[/] {result.DataFlowSteps.Count}");
-
-        return JsonSerializer.Serialize(result);
-    }
-
-    private static async Task<string> RenderTriageAsync(TriageWorkflowService workflow, CancellationToken cancellationToken)
-    {
-        var findingId = AnsiConsole.Ask<string>("Finding ID:");
-        var state = AnsiConsole.Prompt(
-            new SelectionPrompt<string>()
-                .Title("Triage state")
-                .AddChoices("TP", "FP"));
-        var reason = AnsiConsole.Ask<string>("Reason:");
-        var author = AnsiConsole.Ask<string>("Author:", "User");
-
-        var result = await workflow.TriageAsync(findingId, state, reason, author, cancellationToken);
-        AnsiConsole.MarkupLine(result.Success
-            ? $"[green]{result.Message}[/]"
-            : $"[red]{result.Message}[/]");
-
-        return JsonSerializer.Serialize(result);
-    }
-
-    private static async Task<string> RenderTriageBulkAsync(TriageWorkflowService workflow, CancellationToken cancellationToken)
+    private static async Task<string> RenderTriageAsync(CancellationToken cancellationToken)
     {
         var state = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
                 .Title("Triage state")
                 .AddChoices("TP", "FP"));
         var reason = AnsiConsole.Ask<string>("Reason:");
-        var severity = AnsiConsole.Ask<string>("Severity filter (optional, CSV):", string.Empty);
-        var rule = AnsiConsole.Ask<string>("Rule filter (optional, CSV):", string.Empty);
-        var file = AnsiConsole.Ask<string>("File filter (optional, wildcard supported):", string.Empty);
-        var dryRun = AnsiConsole.Confirm("Dry run only?", true);
-        var author = AnsiConsole.Ask<string>("Author:", "User");
+        var target = AnsiConsole.Ask<string>("Target (alias like 1/@1/S-01, CSV aliases, raw ID, or scope):", "scope");
 
-        var result = await workflow.TriageBulkAsync(
-            state,
-            reason,
-            new TriageQueryOptions(severity, rule, file, string.Empty, int.MaxValue),
-            dryRun,
-            author,
-            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = await SarifTools.SarifTriage(state, reason, target);
+        return RenderDualPurposeText(result);
+    }
 
-        AnsiConsole.MarkupLine(result.Success
-            ? $"[green]{result.Message}[/]"
-            : $"[red]{result.Message}[/]");
+    private static string RenderDualPurposeText(CallToolResult result)
+    {
+        var text = (result.Content.FirstOrDefault() as TextContentBlock)?.Text ?? string.Empty;
+        var (displayMarkdown, hiddenJsonState) = SplitDualPurposeText(text);
 
-        return JsonSerializer.Serialize(result);
+        if (!string.IsNullOrWhiteSpace(hiddenJsonState))
+        {
+            RenderStatePanel(hiddenJsonState);
+        }
+
+        if (!string.IsNullOrWhiteSpace(displayMarkdown))
+        {
+            AnsiConsole.Write(new Text(displayMarkdown));
+        }
+
+        return text;
+    }
+
+    private static (string displayMarkdown, string hiddenJsonState) SplitDualPurposeText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (string.Empty, string.Empty);
+        }
+
+        var delimiter = SarifTools.StateContextDelimiter;
+        var delimiterIndex = text.IndexOf(delimiter, StringComparison.Ordinal);
+        if (delimiterIndex < 0)
+        {
+            return (text, string.Empty);
+        }
+
+        var displayMarkdown = text[..delimiterIndex].Trim();
+        var hiddenJsonState = text[(delimiterIndex + delimiter.Length)..]
+            .TrimStart('\r', '\n')
+            .Trim();
+        return (displayMarkdown, hiddenJsonState);
+    }
+
+    private static void RenderStatePanel(string hiddenJsonState)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(hiddenJsonState);
+            if (!doc.RootElement.TryGetProperty("context", out var context))
+            {
+                return;
+            }
+
+            var scopeLabel = "global";
+            if (context.TryGetProperty("active_scope", out var activeScope)
+                && activeScope.ValueKind == JsonValueKind.Object
+                && activeScope.EnumerateObject().Any())
+            {
+                scopeLabel = string.Join(", ", activeScope.EnumerateObject().Select(p => $"{p.Name}={p.Value.ToString()}"));
+            }
+
+            var progressLabel = "n/a";
+            if (context.TryGetProperty("metrics", out var metrics)
+                && metrics.TryGetProperty("returned_in_batch", out var returned)
+                && metrics.TryGetProperty("remaining_in_scope", out var remaining))
+            {
+                progressLabel = $"{returned.GetInt32()} returned / {remaining.GetInt32()} remaining";
+            }
+
+            var panel = new Panel($"Scope: {scopeLabel}\nProgress: {progressLabel}")
+            {
+                Header = new PanelHeader("Active Triage Workspace")
+            };
+
+            AnsiConsole.Write(panel);
+        }
+        catch (JsonException)
+        {
+            // ignore malformed hidden context in CLI fallback path
+        }
     }
 }
