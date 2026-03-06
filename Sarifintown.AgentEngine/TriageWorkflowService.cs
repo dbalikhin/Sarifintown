@@ -7,6 +7,7 @@ namespace Sarifintown.AgentEngine;
 
 internal sealed class TriageWorkflowService
 {
+    private static readonly TimeSpan TreeSitterExtractionTimeout = TimeSpan.FromSeconds(2);
     private readonly IFileReader _fileReader;
     private readonly ITreeSitterEngine _treeSitterEngine;
     private readonly SarifStateService _stateService;
@@ -117,6 +118,54 @@ internal sealed class TriageWorkflowService
         {
             return null;
         }
+
+        return await BuildInspectResultAsync(finding, resolvedEvidenceMode, cancellationToken);
+    }
+
+    public async Task<IReadOnlyDictionary<string, TriageInspectResult>> InspectManyAsync(
+        IEnumerable<string> findingIds,
+        string evidenceMode = "",
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(findingIds);
+
+        var orderedIds = findingIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (orderedIds.Count == 0)
+        {
+            return new Dictionary<string, TriageInspectResult>(StringComparer.Ordinal);
+        }
+
+        var resolvedEvidenceMode = ParseEvidenceMode(evidenceMode);
+        var findings = await LoadFindingsAsync(cancellationToken);
+        var findingsById = findings.ToDictionary(item => item.FindingId, StringComparer.Ordinal);
+
+        var results = new Dictionary<string, TriageInspectResult>(StringComparer.Ordinal);
+        foreach (var findingId in orderedIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!findingsById.TryGetValue(findingId, out var finding))
+            {
+                continue;
+            }
+
+            var result = await BuildInspectResultAsync(finding, resolvedEvidenceMode, cancellationToken);
+            results[findingId] = result;
+        }
+
+        return results;
+    }
+
+    private async Task<TriageInspectResult> BuildInspectResultAsync(
+        TriageFindingEnvelope finding,
+        TriageEvidenceMode resolvedEvidenceMode,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
 
         var steps = new List<TriageInspectStep>();
         var flowLocations = finding.Result.CodeFlows?
@@ -736,7 +785,19 @@ internal sealed class TriageWorkflowService
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var extractedMethod = await _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
+        var extractionTask = _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
+        var timeoutTask = Task.Delay(TreeSitterExtractionTimeout, cancellationToken);
+        var completedTask = await Task.WhenAny(extractionTask, timeoutTask);
+
+        if (completedTask != extractionTask)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            finalSnippet = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
+            _snippetCache?.Set(cacheKey, finalSnippet);
+            return finalSnippet;
+        }
+
+        var extractedMethod = await extractionTask;
         if (!string.IsNullOrWhiteSpace(extractedMethod) && !extractedMethod.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
         {
             finalSnippet = extractedMethod.Trim();

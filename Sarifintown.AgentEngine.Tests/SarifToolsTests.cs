@@ -176,6 +176,8 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(setMeta.GetProperty("context").GetProperty("active_scope").GetProperty("severity").GetString(), Is.EqualTo("high"));
                 Assert.That(setMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(1));
+                Assert.That(setMeta.GetProperty("pause").GetBoolean(), Is.True);
+                Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_triage"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Scoped Query"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
@@ -190,6 +192,51 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(clearMeta.GetProperty("context").GetProperty("active_scope").EnumerateObject().Count(), Is.EqualTo(0));
                 Assert.That(clearMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithLargeLimit_CapsReturnedBatchToHardLimit()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 30).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "hard-limit.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "keep", includeEvidence: false, limit: 100);
+                var meta = JsonSerializer.SerializeToElement(result.Meta);
+
+                Assert.That(meta.GetProperty("context").GetProperty("metrics").GetProperty("returned_in_batch").GetInt32(), Is.EqualTo(25));
             }
             finally
             {

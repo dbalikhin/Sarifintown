@@ -9,6 +9,7 @@ namespace Sarifintown.AgentEngine;
 
 internal sealed class SnippetWarmupService : BackgroundService
 {
+    private static readonly TimeSpan TreeSitterWarmupTimeout = TimeSpan.FromSeconds(2);
     private readonly Channel<string> _findingQueue = Channel.CreateUnbounded<string>();
     private readonly HashSet<string> _queuedFindingIds = new(StringComparer.Ordinal);
     private readonly object _queueLock = new();
@@ -201,7 +202,17 @@ internal sealed class SnippetWarmupService : BackgroundService
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var extractedMethod = await _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine).ConfigureAwait(false);
+        var extractionTask = _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
+        var timeoutTask = Task.Delay(TreeSitterWarmupTimeout, cancellationToken);
+        var completedTask = await Task.WhenAny(extractionTask, timeoutTask).ConfigureAwait(false);
+
+        if (completedTask != extractionTask)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
+        }
+
+        var extractedMethod = await extractionTask.ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(extractedMethod)
             && !extractedMethod.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
         {

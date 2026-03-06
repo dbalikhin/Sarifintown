@@ -27,6 +27,7 @@
 
 <ItemGroup>
 	<Content Include="..\Sarifintown\wwwroot\js\tree-sitter\**\*.*" Link="tree-sitter\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="tree-sitter.debug.json" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 </Project>

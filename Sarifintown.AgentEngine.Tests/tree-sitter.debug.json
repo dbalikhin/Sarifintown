@@ -1,0 +1,1 @@
+{"language":"csharp","sourceCode":"public class DebugSample\n{\n    public void Run()\n    {\n        var value = 42;\n    }\n}","startLine":2,"endLine":5,"projectRoot":"C:/dmitry/SharpSaster","setCurrentDirectory":true,"includeEvidence":true,"limit":25,"scope":"keep","filter":""}

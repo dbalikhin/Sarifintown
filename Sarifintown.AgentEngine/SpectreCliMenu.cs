@@ -118,14 +118,35 @@ internal static class SpectreCliMenu
         var delimiterIndex = text.IndexOf(delimiter, StringComparison.Ordinal);
         if (delimiterIndex < 0)
         {
-            return (text, string.Empty);
+            return (ExtractVulnerabilityReport(text), string.Empty);
         }
 
-        var displayMarkdown = text[..delimiterIndex].Trim();
+        var displayMarkdown = ExtractVulnerabilityReport(text[..delimiterIndex]);
         var hiddenJsonState = text[(delimiterIndex + delimiter.Length)..]
             .TrimStart('\r', '\n')
             .Trim();
         return (displayMarkdown, hiddenJsonState);
+    }
+
+    private static string ExtractVulnerabilityReport(string text)
+    {
+        const string openingTag = "<vulnerability_report>";
+        const string closingTag = "</vulnerability_report>";
+
+        var openingIndex = text.IndexOf(openingTag, StringComparison.Ordinal);
+        if (openingIndex < 0)
+        {
+            return text.Trim();
+        }
+
+        openingIndex += openingTag.Length;
+        var closingIndex = text.IndexOf(closingTag, openingIndex, StringComparison.Ordinal);
+        if (closingIndex < 0)
+        {
+            return text.Trim();
+        }
+
+        return text[openingIndex..closingIndex].Trim();
     }
 
     private static void RenderStatePanel(string hiddenJsonState)
