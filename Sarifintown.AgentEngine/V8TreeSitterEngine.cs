@@ -10,6 +10,7 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
     private readonly V8ScriptEngine _engine;
     private readonly ConcurrentDictionary<string, byte[]> _languageWasmCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _engineGate = new(1, 1);
+    private readonly HashSet<string> _jsLoadedLanguages = new(StringComparer.OrdinalIgnoreCase);
 
     public V8TreeSitterEngine()
     {
@@ -29,27 +30,36 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
         _engine.Execute(treeSitterJs);
         _engine.Execute("var console = { log: function(msg) {}, error: function(msg) {} };");
 
-        // 2. Pass core WASM bytes to JS
-        _engine.Script.coreWasmBytes = coreWasmBytes;
+        // 2. Transfer core WASM bytes efficiently via ArrayBuffer bulk copy
+        var coreBuffer = (IArrayBuffer)_engine.Evaluate($"new ArrayBuffer({coreWasmBytes.Length})");
+        coreBuffer.WriteBytes(coreWasmBytes, 0, (ulong)coreWasmBytes.Length, 0);
+        _engine.Script.coreWasmBuffer = coreBuffer;
 
-        // 3. Setup global initialization script with the wasmBinary injected
+        // 3. Setup global initialization with JS-side language cache to avoid
+        //    repeated WASM compilation per ExtractMethodAsync call
         _engine.Execute(@"
             let parser = null;
             let currentLanguageName = null;
-            
-            async function initTreeSitter() {
-                // Convert .NET byte array to JS Uint8Array
-                const coreArray = new Uint8Array(coreWasmBytes.Length);
-                for (let i = 0; i < coreWasmBytes.Length; i++) {
-                    coreArray[i] = coreWasmBytes[i];
-                }
+            let loadedLanguages = {};
 
-                // Pass the WASM binary directly to TreeSitter's Emscripten bootstrapper
+            async function initTreeSitter() {
+                const coreArray = new Uint8Array(coreWasmBuffer);
                 await TreeSitter.init({
                     wasmBinary: coreArray
                 });
-                
                 parser = new TreeSitter();
+            }
+
+            async function loadLanguageIfNeeded(langName) {
+                if (currentLanguageName === langName) {
+                    return;
+                }
+                if (!loadedLanguages[langName]) {
+                    const wasmArray = new Uint8Array(pendingWasmBuffer);
+                    loadedLanguages[langName] = await TreeSitter.Language.load(wasmArray);
+                }
+                parser.setLanguage(loadedLanguages[langName]);
+                currentLanguageName = langName;
             }
         ");
 
@@ -84,10 +94,10 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
             return string.Empty;
         }
 
-        if (!_languageWasmCache.TryGetValue(normalizedLanguage, out var wasmBytes))
+        if (!_languageWasmCache.ContainsKey(normalizedLanguage))
         {
-            wasmBytes = await File.ReadAllBytesAsync(wasmPath, cancellationToken);
-            _languageWasmCache.TryAdd(normalizedLanguage, wasmBytes);
+            var bytes = await File.ReadAllBytesAsync(wasmPath, cancellationToken);
+            _languageWasmCache.TryAdd(normalizedLanguage, bytes);
         }
 
         var targetStartLine = Math.Max(0, startLine);
@@ -96,22 +106,24 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
         await _engineGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // Transfer WASM bytes to V8 only for languages not yet loaded in JS
+            if (!_jsLoadedLanguages.Contains(normalizedLanguage)
+                && _languageWasmCache.TryGetValue(normalizedLanguage, out var wasmBytes))
+            {
+                var arrayBuffer = (IArrayBuffer)_engine.Evaluate($"new ArrayBuffer({wasmBytes.Length})");
+                arrayBuffer.WriteBytes(wasmBytes, 0, (ulong)wasmBytes.Length, 0);
+                _engine.Script.pendingWasmBuffer = arrayBuffer;
+            }
+
             _engine.Script.sourceCode = sourceCode;
-            _engine.Script.wasmBytes = wasmBytes;
             _engine.Script.targetStartLine = targetStartLine;
             _engine.Script.targetEndLine = targetEndLine;
+            _engine.Script.langName = normalizedLanguage;
 
             var promise = _engine.Evaluate(@"
                 (async () => {
                     try {
-                        const wasmArray = new Uint8Array(wasmBytes.Length);
-                        for (let i = 0; i < wasmBytes.Length; i++) {
-                            wasmArray[i] = wasmBytes[i];
-                        }
-                        
-                        const lang = await TreeSitter.Language.load(wasmArray);
-                        parser.setLanguage(lang);
-
+                        await loadLanguageIfNeeded(langName);
                         const tree = parser.parse(sourceCode);
 
                         const methodNodeTypes = new Set([
@@ -180,6 +192,12 @@ public class V8TreeSitterEngine : ITreeSitterEngine, IDisposable
             ");
 
             string result = (string)await ((ScriptObject)promise).ToTask().ConfigureAwait(false);
+
+            if (!result.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+            {
+                _jsLoadedLanguages.Add(normalizedLanguage);
+            }
+
             return result;
         }
         finally

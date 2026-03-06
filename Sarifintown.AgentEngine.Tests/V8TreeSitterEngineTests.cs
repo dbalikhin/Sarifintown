@@ -92,11 +92,6 @@ namespace Sarifintown.AgentEngine.Tests
             using var engine = new V8TreeSitterEngine();
             await engine.InitializeAsync();
 
-            if (Debugger.IsAttached)
-            {
-                Debugger.Break();
-            }
-
             var result = await engine.ExtractMethodAsync(
                 config.SourceCode,
                 config.Language,
