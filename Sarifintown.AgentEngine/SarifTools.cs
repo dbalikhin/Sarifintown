@@ -27,6 +27,9 @@ namespace Sarifintown.AgentEngine
         private static string _localUiBaseUrl = string.Empty;
         private static string _workspaceRoot = Directory.GetCurrentDirectory();
         private static ActiveScopeFilter _activeScope = new();
+        private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
+        private static int _nextDisplayId = 1;
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -118,10 +121,13 @@ namespace Sarifintown.AgentEngine
             {
                 _workspaceRoot = Path.GetFullPath(workspaceRoot);
                 _activeScope = new ActiveScopeFilter();
+                DisplayIdToFindingId.Clear();
+                FindingIdToDisplayId.Clear();
+                _nextDisplayId = 1;
             }
         }
 
-        [McpServerTool(Name = "sarif.get")]
+        [McpServerTool(Name = "sarif_get")]
         [Description("Retrieves prioritized SARIF findings, manages persistent Active Scope, and returns scope metrics.")]
         public static async Task<CallToolResult> SarifGet(
             [Description("Scope action: keep, set, refine, or clear.")]
@@ -144,25 +150,28 @@ namespace Sarifintown.AgentEngine
                         total_in_scope = payload.Context.Metrics.TotalInScope,
                         returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
                         remaining_in_scope = payload.Context.Metrics.RemainingInScope
-                    }
+                    },
+                    aliases = payload.Findings
+                        .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
+                        .ToArray()
                 }
             };
 
             return CreateDualPurposeResult(
                 markdown: BuildScopedGetMarkdown(payload),
                 systemStateContext: stateContext,
-                resourceUri: BuildUiResourceUri("triage", "sarif.get", string.Empty),
-                additionalMeta: BuildScopedMeta(payload.Context));
+                resourceUri: BuildUiResourceUri("triage", "sarif_get", string.Empty),
+                additionalMeta: BuildScopedMeta(payload));
         }
 
-        [McpServerTool(Name = "sarif.triage")]
+        [McpServerTool(Name = "sarif_triage")]
         [Description("Applies TP/FP decisions to a target finding, list of findings, or current Active Scope.")]
         public static async Task<CallToolResult> SarifTriage(
-            [Description("Decision state: TP or FP.")]
+            [Description("Decision state: confirmed, false_positive, test_code, wont_fix, or mitigated.")]
             string state,
             [Description("Decision reason/audit note.")]
             string reason,
-            [Description("Target: single finding id, CSV ids, or literal scope.")]
+            [Description("Target displayid (for example 1), CSV displayid list (1,2,3), or literal scope.")]
             string target)
         {
             var payload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
@@ -170,7 +179,7 @@ namespace Sarifintown.AgentEngine
             return CreateDualPurposeResult(
                 markdown: BuildScopedTriageMarkdown(payload),
                 systemStateContext: null,
-                resourceUri: BuildUiResourceUri("triage", "sarif.triage", string.Empty),
+                resourceUri: BuildUiResourceUri("triage", "sarif_triage", string.Empty),
                 additionalMeta: null);
         }
 
@@ -284,6 +293,7 @@ namespace Sarifintown.AgentEngine
             var findingRows = new List<ScopedFinding>(executionFindings.Count);
             foreach (var finding in executionFindings)
             {
+                var displayId = GetOrCreateDisplayId(finding.FindingId);
                 TriageInspectResult? evidence = null;
                 if (includeEvidence)
                 {
@@ -291,6 +301,7 @@ namespace Sarifintown.AgentEngine
                 }
 
                 findingRows.Add(new ScopedFinding(
+                    displayId,
                     finding.FindingId,
                     finding.Severity,
                     finding.State,
@@ -334,7 +345,7 @@ namespace Sarifintown.AgentEngine
                 throw new ArgumentException("target is required.", nameof(target));
             }
 
-            var normalizedState = NormalizeStrictDecisionState(state);
+            var (requestedState, workflowState) = NormalizeDecisionState(state);
             var workflow = CreateTriageWorkflowService();
 
             List<string> targetIds;
@@ -350,13 +361,17 @@ namespace Sarifintown.AgentEngine
             }
             else
             {
-                targetIds = ResolveFindingIds(target);
+                targetIds = ResolveFindingIds(target)
+                    .Select(ResolveFindingIdFromAliasOrRaw)
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
             }
 
             var modifiedIds = new List<string>();
             foreach (var targetId in targetIds)
             {
-                var decision = await workflow.TriageAsync(targetId, normalizedState, reason, author);
+                var decision = await workflow.TriageAsync(targetId, workflowState, reason, author);
                 if (decision.Success)
                 {
                     modifiedIds.Add(targetId);
@@ -365,22 +380,31 @@ namespace Sarifintown.AgentEngine
 
             return new ScopedTriagePayload(
                 modifiedIds.Count == targetIds.Count,
-                normalizedState,
+                requestedState,
                 reason,
                 target,
                 modifiedIds.Count,
-                modifiedIds);
+                modifiedIds,
+                workflowState);
         }
 
-        private static string NormalizeStrictDecisionState(string state)
+        private static (string RequestedState, string WorkflowState) NormalizeDecisionState(string state)
         {
-            var normalized = state.Trim().ToUpperInvariant();
-            if (normalized is "TP" or "FP")
+            if (string.IsNullOrWhiteSpace(state))
             {
-                return normalized;
+                throw new ArgumentException("state is required.", nameof(state));
             }
 
-            throw new ArgumentException("state must be TP or FP.", nameof(state));
+            var normalized = state.Trim().ToLowerInvariant();
+            return normalized switch
+            {
+                "confirmed" => ("confirmed", "TP"),
+                "false_positive" => ("false_positive", "FP"),
+                "test_code" => ("test_code", "FP"),
+                "wont_fix" => ("wont_fix", "TP"),
+                "mitigated" => ("mitigated", "TP"),
+                _ => throw new ArgumentException("state must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.", nameof(state))
+            };
         }
 
         private static ScopeAction ParseScopeAction(string scope)
@@ -535,22 +559,25 @@ namespace Sarifintown.AgentEngine
             return result;
         }
 
-        private static JsonObject BuildScopedMeta(ScopedContext context)
+        private static JsonObject BuildScopedMeta(ScopedGetPayload payload)
         {
-            ArgumentNullException.ThrowIfNull(context);
+            ArgumentNullException.ThrowIfNull(payload);
 
             return JsonSerializer.SerializeToNode(new
             {
                 context = new
                 {
-                    notice = context.Notice,
-                    active_scope = context.ActiveScope,
+                    notice = payload.Context.Notice,
+                    active_scope = payload.Context.ActiveScope,
                     metrics = new
                     {
-                        total_in_scope = context.Metrics.TotalInScope,
-                        returned_in_batch = context.Metrics.ReturnedInBatch,
-                        remaining_in_scope = context.Metrics.RemainingInScope
-                    }
+                        total_in_scope = payload.Context.Metrics.TotalInScope,
+                        returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
+                        remaining_in_scope = payload.Context.Metrics.RemainingInScope
+                    },
+                    aliases = payload.Findings
+                        .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
+                        .ToArray()
                 }
             }) as JsonObject ?? new JsonObject();
         }
@@ -690,12 +717,12 @@ namespace Sarifintown.AgentEngine
                 lines.Add("| Id | Severity | State | Rule | Location |\n|---|---|---|---|---|");
                 foreach (var finding in findings)
                 {
-                    lines.Add($"| `{EscapeMarkdown(finding.Id)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
+                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
                 }
             }
 
             lines.Add(string.Empty);
-            lines.Add("**Next action:** Use `sarif.triage` with `state`, `reason`, and `target`.");
+            lines.Add("**Next action:** Use `sarif_triage` with `state`, `reason`, and `target`.");
 
             return string.Join(Environment.NewLine, lines);
         }
@@ -710,10 +737,11 @@ namespace Sarifintown.AgentEngine
                 string.Empty,
                 $"- Success: **{payload.Success}**",
                 $"- State: `{EscapeMarkdown(payload.State)}`",
+                $"- Internal workflow state: `{EscapeMarkdown(payload.WorkflowState)}`",
                 $"- Target: `{EscapeMarkdown(payload.Target)}`",
                 $"- Affected findings: **{payload.AffectedCount}**",
                 string.Empty,
-                "**Next action:** Run `sarif.get` to verify remaining findings in scope."
+                "**Next action:** Run `sarif_get` to verify remaining findings in scope."
             ]);
         }
 
@@ -728,6 +756,48 @@ namespace Sarifintown.AgentEngine
                 .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
+        }
+
+        private static string GetOrCreateDisplayId(string findingId)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(findingId);
+
+            lock (SyncRoot)
+            {
+                if (FindingIdToDisplayId.TryGetValue(findingId, out var existingDisplayId))
+                {
+                    return existingDisplayId;
+                }
+
+                var displayId = _nextDisplayId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _nextDisplayId++;
+
+                FindingIdToDisplayId[findingId] = displayId;
+                DisplayIdToFindingId[displayId] = findingId;
+                DisplayIdToFindingId[$"@{displayId}"] = findingId;
+                DisplayIdToFindingId[$"S-{int.Parse(displayId, System.Globalization.CultureInfo.InvariantCulture):00}"] = findingId;
+
+                return displayId;
+            }
+        }
+
+        private static string ResolveFindingIdFromAliasOrRaw(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return string.Empty;
+            }
+
+            var normalized = token.Trim();
+            lock (SyncRoot)
+            {
+                if (DisplayIdToFindingId.TryGetValue(normalized, out var aliasedFindingId))
+                {
+                    return aliasedFindingId;
+                }
+            }
+
+            return normalized;
         }
 
         private static string EscapeMarkdown(string value)
@@ -1000,7 +1070,8 @@ namespace Sarifintown.AgentEngine
         private sealed record ScopedLocation(string File, int? Line);
 
         private sealed record ScopedFinding(
-            string Id,
+            string DisplayId,
+            string FindingId,
             string Severity,
             string State,
             string Rule,
@@ -1016,7 +1087,8 @@ namespace Sarifintown.AgentEngine
             string Reason,
             string Target,
             int AffectedCount,
-            IReadOnlyList<string> ModifiedFindingIds);
+            IReadOnlyList<string> ModifiedFindingIds,
+            string WorkflowState);
 
         [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
         public static string GenerateAnalysisReport(

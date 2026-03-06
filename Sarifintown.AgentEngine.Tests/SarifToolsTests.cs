@@ -33,6 +33,60 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        [Test]
+        public async Task SarifTriage_WithDisplayAliasTarget_ResolvesToUnderlyingFindingId()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "alias-target.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-ALIAS",
+                      "level": "error",
+                      "message": { "text": "alias target" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                var stateContext = JsonSerializer.SerializeToElement(getResult.Meta);
+                var alias = stateContext
+                    .GetProperty("context")
+                    .GetProperty("aliases")[0]
+                    .GetProperty("displayid")
+                    .GetString();
+
+                Assert.That(alias, Is.Not.Null.And.Not.Empty);
+
+                var triageResult = await SarifTools.SarifTriage(
+                    state: "confirmed",
+                    reason: "alias-validated",
+                    target: alias!);
+
+                var triageText = triageResult.Content[0] as TextContentBlock;
+                Assert.That(triageText, Is.Not.Null);
+                Assert.That(triageText!.Text, Contains.Substring("Affected findings: **1**"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
         private class FakeTreeSitterEngine : ITreeSitterEngine
         {
             private static int _extractMethodCallCount;
@@ -185,7 +239,7 @@ namespace Sarifintown.AgentEngine.Tests
                 await SarifTools.SarifGet(scope: "set", filter: "severity:high");
 
                 var triageResult = await SarifTools.SarifTriage(
-                    state: "TP",
+                    state: "confirmed",
                     reason: "validated",
                     target: "scope");
 
@@ -197,6 +251,13 @@ namespace Sarifintown.AgentEngine.Tests
             {
                 Directory.Delete(workspace, true);
             }
+        }
+
+        [Test]
+        public void SarifTriage_WithInvalidState_ThrowsArgumentException()
+        {
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await SarifTools.SarifTriage(state: "tp", reason: "invalid", target: "scope"));
         }
 
         [Test]

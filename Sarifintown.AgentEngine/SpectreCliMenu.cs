@@ -48,7 +48,7 @@ internal static class SpectreCliMenu
             "Triage status" => await RenderStatusAsync(cancellationToken),
             "Triage list" => await RenderListAsync(cancellationToken),
             "Triage decision" => await RenderTriageAsync(cancellationToken),
-            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif.get/sarif.triage flow: {action}" }),
+            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_triage flow: {action}" }),
             _ => JsonSerializer.Serialize(new { success = false, message = $"Unsupported action: {action}" })
         };
     }
@@ -82,7 +82,7 @@ internal static class SpectreCliMenu
                 .Title("Triage state")
                 .AddChoices("TP", "FP"));
         var reason = AnsiConsole.Ask<string>("Reason:");
-        var target = AnsiConsole.Ask<string>("Target (finding id, id1,id2, or scope):", "scope");
+        var target = AnsiConsole.Ask<string>("Target (alias like 1/@1/S-01, CSV aliases, raw ID, or scope):", "scope");
 
         cancellationToken.ThrowIfCancellationRequested();
         var result = await SarifTools.SarifTriage(state, reason, target);
@@ -115,15 +115,16 @@ internal static class SpectreCliMenu
         }
 
         var delimiter = SarifTools.StateContextDelimiter;
-        var marker = $"\n\n{delimiter}\n";
-        var delimiterIndex = text.IndexOf(marker, StringComparison.Ordinal);
+        var delimiterIndex = text.IndexOf(delimiter, StringComparison.Ordinal);
         if (delimiterIndex < 0)
         {
             return (text, string.Empty);
         }
 
         var displayMarkdown = text[..delimiterIndex].Trim();
-        var hiddenJsonState = text[(delimiterIndex + marker.Length)..].Trim();
+        var hiddenJsonState = text[(delimiterIndex + delimiter.Length)..]
+            .TrimStart('\r', '\n')
+            .Trim();
         return (displayMarkdown, hiddenJsonState);
     }
 

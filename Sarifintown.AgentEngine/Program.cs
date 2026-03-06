@@ -181,14 +181,14 @@ static IReadOnlyList<string> ResolveCompletionValues(
 
     IEnumerable<string> candidates = normalizedPrompt switch
     {
-        "sarif.get" => normalizedArgument switch
+        "sarif_get" => normalizedArgument switch
         {
             "scope" => new[] { "keep", "set", "refine", "clear" },
             "includeEvidence" => new[] { "true", "false" },
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },
-        "sarif.triage" => normalizedArgument switch
+        "sarif_triage" => normalizedArgument switch
         {
             "state" => completionData.DecisionStates,
             "reason" => completionData.Reasons,
