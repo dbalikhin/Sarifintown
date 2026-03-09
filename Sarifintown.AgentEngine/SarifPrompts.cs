@@ -7,15 +7,38 @@ namespace Sarifintown.AgentEngine;
 public static class SarifPrompts
 {
     /// <summary>
-    /// Builds a slash-command prompt for consolidated triage read operations.
+    /// Builds a slash-command prompt for setting SARIF finding filters.
+    /// </summary>
+    [McpServerPrompt(Name = "sarif_filter", Title = "Filter Findings")]
+    [Description("Set or clear filters for SARIF findings. Call with no query to list available filter values.")]
+    public static string FilterPrompt(
+        [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit to list available filters.")]
+        string query = "")
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return """
+                EXECUTION PROTOCOL — follow these steps exactly:
+                1. Call `sarif_filter` with no arguments to list available filter values.
+                2. Output the result VERBATIM.
+                3. STOP and wait for the user to choose filters.
+                """;
+        }
+
+        return $"""
+            EXECUTION PROTOCOL — follow these steps exactly:
+            1. Call `sarif_filter` with query='{query}'.
+            2. Output the confirmation VERBATIM.
+            3. Call `sarif_get` to view filtered results.
+            """;
+    }
+
+    /// <summary>
+    /// Builds a slash-command prompt for reading SARIF findings with current filters.
     /// </summary>
     [McpServerPrompt(Name = "sarif_get", Title = "Get Triage Posture")]
-    [Description("Retrieve posture summary and prioritized findings. Use includeEvidence=true to also get assembled triage guidance per finding.")]
+    [Description("Retrieve posture summary and prioritized findings using the active filter. Use includeEvidence=true to also get assembled triage guidance per finding.")]
     public static string TriageQueryPrompt(
-        [Description("Scope action (keep, set, refine, clear).")]
-        string scope = "keep",
-        [Description("Optional scope filter expression (for example: severity:high, rule:SQLI).")]
-        string filter = "",
         [Description("Maximum finding count to return.")]
         int limit = 10,
         [Description("Optional 1-based page number. When provided, it overrides automatic pagination and pageToken.")]
@@ -31,7 +54,7 @@ public static class SarifPrompts
 
         return $"""
             EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` with scope='{scope}', filter='{filter}', includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, page={page}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}, pageToken='{pageToken}'.
+            1. Call `sarif_get` with includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, page={page}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}, pageToken='{pageToken}'.
             2. Output exactly one <vulnerability_report> block VERBATIM. Do NOT summarize, interpret, duplicate, or append extra text.
             3. STOP immediately and wait for explicit user instruction.
             """;
@@ -54,7 +77,7 @@ public static class SarifPrompts
             EXECUTION PROTOCOL — follow these steps exactly:
             1. Call `sarif_triage` with state='{state}', reason='{reason}', target='{target}'.
             2. Output the result block VERBATIM. Do NOT add commentary.
-            3. Call `sarif_get` with scope='keep' to verify remaining findings.
+            3. Call `sarif_get` to verify remaining findings.
             """;
     }
 }

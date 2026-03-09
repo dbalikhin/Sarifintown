@@ -111,6 +111,7 @@ SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyServi
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
+await RunStartupStageAsync("Available facets initialization", () => SarifTools.InitializeAvailableFacetsAsync());
 WriteStartupInfo("MCP tool dependencies configured.");
 
 await RunStartupStageAsync("Web host start", () => app.StartAsync());
@@ -182,9 +183,13 @@ static IReadOnlyList<string> ResolveCompletionValues(
 
     IEnumerable<string> candidates = normalizedPrompt switch
     {
+        "sarif_filter" => normalizedArgument switch
+        {
+            "query" => BuildFilterQueryCompletions(completionData),
+            _ => Array.Empty<string>()
+        },
         "sarif_get" => normalizedArgument switch
         {
-            "scope" => new[] { "keep", "set", "refine", "clear" },
             "includeEvidence" => new[] { "true", "false" },
             "debugPrompt" => new[] { "true", "false" },
             "limit" => completionData.Limits,
@@ -216,6 +221,28 @@ static IReadOnlyList<string> ApplyPrefixFilter(IEnumerable<string> candidates, s
         .Where(candidate => normalizedPrefix.Length == 0 || candidate.StartsWith(normalizedPrefix, StringComparison.OrdinalIgnoreCase))
         .Take(50)
         .ToArray();
+}
+
+static IReadOnlyList<string> BuildFilterQueryCompletions(PromptCompletionData completionData)
+{
+    var completions = new List<string> { "clear" };
+
+    foreach (var severity in completionData.Severities)
+    {
+        completions.Add($"severity:{severity}");
+    }
+
+    foreach (var rule in completionData.Rules)
+    {
+        completions.Add($"rule:{rule}");
+    }
+
+    foreach (var state in completionData.ListStates)
+    {
+        completions.Add($"status:{state}");
+    }
+
+    return completions;
 }
 
 static CompleteResult CreateCompletionResult(IReadOnlyList<string> values)

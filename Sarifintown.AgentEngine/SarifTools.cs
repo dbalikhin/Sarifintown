@@ -34,6 +34,9 @@ namespace Sarifintown.AgentEngine
         private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
         private static int _nextDisplayId = 1;
+        private static HashSet<string> _availableSeverities = new(StringComparer.OrdinalIgnoreCase);
+        private static HashSet<string> _availableRules = new(StringComparer.OrdinalIgnoreCase);
+        private static HashSet<string> _availableStatuses = new(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
         private static readonly string[] IdeHostTokens =
         [
             "vscode",
@@ -131,13 +134,73 @@ namespace Sarifintown.AgentEngine
             }
         }
 
+        /// <summary>
+        /// Populates available filter facets (severities, rules, statuses) from loaded SARIF findings.
+        /// Call after SarifStateService initialization completes.
+        /// </summary>
+        public static async Task InitializeAvailableFacetsAsync()
+        {
+            var workflow = CreateTriageWorkflowService();
+            var allFindings = await workflow.ListAsync(new TriageQueryOptions(Limit: int.MaxValue));
+
+            lock (SyncRoot)
+            {
+                _availableSeverities = allFindings
+                    .Select(f => f.Severity)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                _availableRules = allFindings
+                    .Select(f => f.RuleName)
+                    .Where(r => !string.IsNullOrWhiteSpace(r))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                _availableStatuses = allFindings
+                    .Select(f => f.State)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                if (_availableStatuses.Count == 0)
+                {
+                    _availableStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
+                }
+            }
+        }
+
+        [McpServerTool(Name = "sarif_filter")]
+        [Description("Set or clear the active scope filter for SARIF findings. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values. Call sarif_get after filtering to view results.")]
+        public static Task<CallToolResult> SarifFilter(
+            [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit or leave empty to list available filters.")]
+            string query = "")
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return Task.FromResult(BuildAvailableFiltersResult());
+            }
+
+            var normalizedQuery = query.Trim();
+            if (string.Equals(normalizedQuery, "clear", StringComparison.OrdinalIgnoreCase))
+            {
+                SetActiveScope(new ActiveScopeFilter());
+                ResetPagination();
+                return Task.FromResult(CreatePlainTextResult("✅ Scope cleared. All filters removed. Run `sarif_get` to view unfiltered results."));
+            }
+
+            var parsedFilter = ParseSpaceSeparatedQuery(normalizedQuery);
+            SetActiveScope(parsedFilter);
+            ResetPagination();
+
+            var scopeDict = ToScopeDictionary(parsedFilter);
+            var filterDescription = scopeDict.Count == 0
+                ? "none"
+                : string.Join(", ", scopeDict.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
+
+            return Task.FromResult(CreatePlainTextResult($"✅ Scope updated. Current filters: {filterDescription}. Run `sarif_get` to view results."));
+        }
+
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page/filter/scope change.")]
+        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters.")]
         public static async Task<CallToolResult> SarifGet(
-            [Description("Scope action: keep (reuse active scope), set (replace scope), refine (narrow scope), or clear (remove all filters).")] 
-            string scope = "keep",
-            [Description("Filter expression, for example: severity:high, rule:SQLI, file:Controller.cs. Combine with commas.")]
-            string filter = "",
             [Description("When true, attach evidence blocks and assembled triage prompt per finding.")]
             bool includeEvidence = false,
             [Description("Maximum findings to return (1-25).")]
@@ -150,7 +213,7 @@ namespace Sarifintown.AgentEngine
             string pageToken = "")
         {
             var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
-            var payload = await ExecuteScopedGetAsync(scope, filter, includeEvidence, safeLimit, page, debugPrompt, pageToken);
+            var payload = await ExecutePureGetAsync(includeEvidence, safeLimit, page, debugPrompt, pageToken);
             var stateContext = new
             {
                 context = new
@@ -176,7 +239,8 @@ namespace Sarifintown.AgentEngine
                     },
                     aliases = payload.Findings
                         .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
-                        .ToArray()
+                        .ToArray(),
+                    available_facets = payload.AvailableFacets
                 }
             };
 
@@ -277,12 +341,8 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        private static async Task<ScopedGetPayload> ExecuteScopedGetAsync(string scope, string filter, bool includeEvidence, int limit, int page = 0, bool debugPrompt = false, string pageToken = "")
+        private static async Task<ScopedGetPayload> ExecutePureGetAsync(bool includeEvidence, int limit, int page = 0, bool debugPrompt = false, string pageToken = "")
         {
-            var scopeAction = ParseScopeAction(scope);
-            var parsedFilter = string.IsNullOrWhiteSpace(filter)
-                ? new ActiveScopeFilter()
-                : ParseScopeFilter(filter);
             if (page < 0)
             {
                 throw new ArgumentException("page must be greater than or equal to 0.", nameof(page));
@@ -292,35 +352,9 @@ namespace Sarifintown.AgentEngine
             var hasExplicitPageToken = !string.IsNullOrWhiteSpace(pageToken);
             var hasExplicitPage = page > 0;
 
-            if (scopeAction == ScopeAction.Refine && parsedFilter.IsEmpty)
-            {
-                throw new ArgumentException("filter is required when scope is refine.", nameof(filter));
-            }
-
             var activeScope = GetActiveScope();
-
-            switch (scopeAction)
-            {
-                case ScopeAction.Set:
-                    activeScope = parsedFilter;
-                    SetActiveScope(activeScope);
-                    break;
-                case ScopeAction.Refine:
-                    activeScope = MergeScope(activeScope, parsedFilter);
-                    SetActiveScope(activeScope);
-                    break;
-                case ScopeAction.Clear:
-                    activeScope = new ActiveScopeFilter();
-                    SetActiveScope(activeScope);
-                    break;
-            }
-
-            var executionScope = scopeAction == ScopeAction.Keep && !parsedFilter.IsEmpty
-                ? MergeScope(activeScope, parsedFilter)
-                : activeScope;
-            var paginationScopeKey = BuildPaginationScopeKey(executionScope);
+            var paginationScopeKey = BuildPaginationScopeKey(activeScope);
             var batchLimit = limit <= 0 ? 10 : limit;
-            var resetToFirstPage = scopeAction != ScopeAction.Keep;
 
             var cursorOffset = parsedPageTokenOffset;
             if (hasExplicitPage)
@@ -331,13 +365,7 @@ namespace Sarifintown.AgentEngine
             {
                 lock (SyncRoot)
                 {
-                    if (resetToFirstPage)
-                    {
-                        _paginationScopeKey = paginationScopeKey;
-                        _paginationNextOffset = 0;
-                        cursorOffset = 0;
-                    }
-                    else if (string.Equals(_paginationScopeKey, paginationScopeKey, StringComparison.Ordinal))
+                    if (string.Equals(_paginationScopeKey, paginationScopeKey, StringComparison.Ordinal))
                     {
                         cursorOffset = _paginationNextOffset;
                     }
@@ -353,20 +381,17 @@ namespace Sarifintown.AgentEngine
             var workflow = CreateTriageWorkflowService();
 
             var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
-            var executionScopeFindings = executionScope == activeScope
-                ? activeScopeFindings
-                : await workflow.ListAsync(executionScope.ToQueryOptions(int.MaxValue));
 
-            var effectiveOffset = Math.Min(cursorOffset, executionScopeFindings.Count);
-            var executionFindings = executionScopeFindings
+            var effectiveOffset = Math.Min(cursorOffset, activeScopeFindings.Count);
+            var executionFindings = activeScopeFindings
                 .Skip(effectiveOffset)
                 .Take(batchLimit)
                 .ToList();
             var nextOffset = effectiveOffset + executionFindings.Count;
-            var hasMore = nextOffset < executionScopeFindings.Count;
-            var totalPages = executionScopeFindings.Count <= 0
+            var hasMore = nextOffset < activeScopeFindings.Count;
+            var totalPages = activeScopeFindings.Count <= 0
                 ? 1
-                : (int)Math.Ceiling((double)executionScopeFindings.Count / batchLimit);
+                : (int)Math.Ceiling((double)activeScopeFindings.Count / batchLimit);
             var currentPage = (int)Math.Floor((double)effectiveOffset / batchLimit) + 1;
             var previousPageToken = currentPage > 1
                 ? ((currentPage - 2) * batchLimit).ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -440,14 +465,71 @@ namespace Sarifintown.AgentEngine
                 nextPageNumber,
                 previousPageNumber);
 
+            // Build leaf directory facets from unpaginated results
+            var leafDirectories = ComputeLeafDirectoryFacets(activeScopeFindings);
+            var scopeRules = activeScopeFindings
+                .Select(f => f.RuleName)
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(r => r, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var scopeSeverities = activeScopeFindings
+                .Select(f => f.Severity)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var scopeStatuses = activeScopeFindings
+                .Select(f => f.State)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var availableFacets = new ScopedAvailableFacets(scopeRules, scopeSeverities, scopeStatuses, leafDirectories);
+
             return new ScopedGetPayload(
                 new ScopedContext(
-                    "Results are filtered by the persistent Active Scope.",
+                    "Results are filtered by the persistent Active Scope. Use sarif_filter to change filters.",
                     ToScopeDictionary(activeScope),
                     new ScopedMetrics(metrics.TotalInScope, metrics.ReturnedInBatch, metrics.RemainingInScope),
                     pagination),
                 findingRows,
-                debugPrompt);
+                debugPrompt,
+                availableFacets);
+        }
+
+        /// <summary>
+        /// Computes the top 3-5 noisiest leaf directories (immediate parent folder of each file) from findings.
+        /// </summary>
+        private static string[] ComputeLeafDirectoryFacets(IReadOnlyList<TriageListItem> findings, int maxDirectories = 5)
+        {
+            return findings
+                .Select(f => f.FilePath)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => ExtractLeafDirectory(p.Replace('\\', '/')))
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .GroupBy(d => d, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Take(maxDirectories)
+                .Select(g => g.Key)
+                .ToArray();
+        }
+
+        private static string ExtractLeafDirectory(string normalizedPath)
+        {
+            var lastSlash = normalizedPath.LastIndexOf('/');
+            if (lastSlash <= 0)
+            {
+                return string.Empty;
+            }
+
+            var withoutFile = normalizedPath[..lastSlash];
+            var parentSlash = withoutFile.LastIndexOf('/');
+            return parentSlash >= 0
+                ? withoutFile[(parentSlash + 1)..]
+                : withoutFile;
         }
 
         /// <summary>
@@ -574,24 +656,6 @@ namespace Sarifintown.AgentEngine
             };
         }
 
-        private static ScopeAction ParseScopeAction(string scope)
-        {
-            if (string.IsNullOrWhiteSpace(scope))
-            {
-                return ScopeAction.Keep;
-            }
-
-            var normalized = scope.Trim().ToLowerInvariant();
-            return normalized switch
-            {
-                "keep" => ScopeAction.Keep,
-                "set" => ScopeAction.Set,
-                "refine" => ScopeAction.Refine,
-                "clear" => ScopeAction.Clear,
-                _ => throw new ArgumentException("scope must be one of: keep, set, refine, clear.", nameof(scope))
-            };
-        }
-
         private static ActiveScopeFilter ParseScopeFilter(string filter)
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -627,8 +691,89 @@ namespace Sarifintown.AgentEngine
             }
 
             map.TryGetValue("state", out var state);
+            if (string.IsNullOrWhiteSpace(state) && map.TryGetValue("status", out var status))
+            {
+                state = status;
+            }
 
             return new ActiveScopeFilter(severity ?? string.Empty, rule ?? string.Empty, file ?? string.Empty, state ?? string.Empty);
+        }
+
+        private static ActiveScopeFilter ParseSpaceSeparatedQuery(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return new ActiveScopeFilter();
+            }
+
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var inQuotes = false;
+            var buffer = new System.Text.StringBuilder();
+
+            foreach (var ch in query)
+            {
+                if (ch == '"')
+                {
+                    inQuotes = !inQuotes;
+                    buffer.Append(ch);
+                    continue;
+                }
+
+                if (ch == ' ' && !inQuotes)
+                {
+                    AddTokenToMap(buffer.ToString(), map);
+                    buffer.Clear();
+                    continue;
+                }
+
+                buffer.Append(ch);
+            }
+
+            AddTokenToMap(buffer.ToString(), map);
+
+            map.TryGetValue("severity", out var severity);
+            map.TryGetValue("rule", out var rule);
+            if (string.IsNullOrWhiteSpace(rule) && map.TryGetValue("ruleId", out var ruleId))
+            {
+                rule = ruleId;
+            }
+
+            map.TryGetValue("path", out var path);
+            if (string.IsNullOrWhiteSpace(path) && map.TryGetValue("file", out var file))
+            {
+                path = file;
+            }
+
+            map.TryGetValue("status", out var status);
+            if (string.IsNullOrWhiteSpace(status) && map.TryGetValue("state", out var state))
+            {
+                status = state;
+            }
+
+            return new ActiveScopeFilter(severity ?? string.Empty, rule ?? string.Empty, path ?? string.Empty, status ?? string.Empty);
+
+            static void AddTokenToMap(string token, Dictionary<string, string> map)
+            {
+                var trimmed = token.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed))
+                {
+                    return;
+                }
+
+                var separatorIndex = trimmed.IndexOf(':');
+                if (separatorIndex <= 0 || separatorIndex == trimmed.Length - 1)
+                {
+                    return;
+                }
+
+                var key = trimmed[..separatorIndex].Trim();
+                var value = trimmed[(separatorIndex + 1)..].Trim().Trim('"', '\'');
+
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                {
+                    map[key] = value;
+                }
+            }
         }
 
         private static IReadOnlyList<string> SplitFilterTokens(string filter)
@@ -675,15 +820,6 @@ namespace Sarifintown.AgentEngine
             return result;
         }
 
-        private static ActiveScopeFilter MergeScope(ActiveScopeFilter baseline, ActiveScopeFilter overlay)
-        {
-            return new ActiveScopeFilter(
-                string.IsNullOrWhiteSpace(overlay.Severity) ? baseline.Severity : overlay.Severity,
-                string.IsNullOrWhiteSpace(overlay.Rule) ? baseline.Rule : overlay.Rule,
-                string.IsNullOrWhiteSpace(overlay.File) ? baseline.File : overlay.File,
-                string.IsNullOrWhiteSpace(overlay.State) ? baseline.State : overlay.State);
-        }
-
         private static ActiveScopeFilter GetActiveScope()
         {
             lock (SyncRoot)
@@ -698,6 +834,95 @@ namespace Sarifintown.AgentEngine
             {
                 _activeScope = activeScope;
             }
+        }
+
+        private static void ResetPagination()
+        {
+            lock (SyncRoot)
+            {
+                _paginationScopeKey = string.Empty;
+                _paginationNextOffset = 0;
+            }
+        }
+
+        private static CallToolResult BuildAvailableFiltersResult()
+        {
+            HashSet<string> severities, rules, statuses;
+            ActiveScopeFilter currentScope;
+            lock (SyncRoot)
+            {
+                severities = new HashSet<string>(_availableSeverities, StringComparer.OrdinalIgnoreCase);
+                rules = new HashSet<string>(_availableRules, StringComparer.OrdinalIgnoreCase);
+                statuses = new HashSet<string>(_availableStatuses, StringComparer.OrdinalIgnoreCase);
+                currentScope = _activeScope;
+            }
+
+            var lines = new List<string>
+            {
+                "## Available Filters",
+                string.Empty,
+                "Use `sarif_filter` with a space-separated query string. Example: `severity:high rule:SQLI status:open path:controllers`",
+                string.Empty,
+                "### Current Scope",
+                currentScope.IsEmpty ? "- *(no active filters)*" : FormatActiveFilters(currentScope),
+                string.Empty,
+                "### Severity",
+                severities.Count > 0
+                    ? string.Join(", ", severities.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).Select(s => $"`{s}`"))
+                    : "*(none discovered)*",
+                string.Empty,
+                "### Rule",
+                rules.Count > 0
+                    ? string.Join(", ", rules.OrderBy(r => r, StringComparer.OrdinalIgnoreCase).Select(r => $"`{r}`"))
+                    : "*(none discovered)*",
+                string.Empty,
+                "### Status",
+                string.Join(", ", statuses.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).Select(s => $"`{s}`")),
+                string.Empty,
+                "### Path",
+                "Any substring of the SARIF file URI (e.g. `controllers`, `src/models`).",
+                string.Empty,
+                "To clear all filters: `sarif_filter clear`"
+            };
+
+            return CreatePlainTextResult(string.Join(Environment.NewLine, lines));
+        }
+
+        private static string FormatActiveFilters(ActiveScopeFilter scope)
+        {
+            var parts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(scope.Severity))
+            {
+                parts.Add($"- Severity: `{scope.Severity}`");
+            }
+
+            if (!string.IsNullOrWhiteSpace(scope.Rule))
+            {
+                parts.Add($"- Rule: `{scope.Rule}`");
+            }
+
+            if (!string.IsNullOrWhiteSpace(scope.File))
+            {
+                parts.Add($"- Path: `{scope.File}`");
+            }
+
+            if (!string.IsNullOrWhiteSpace(scope.State))
+            {
+                parts.Add($"- Status: `{scope.State}`");
+            }
+
+            return string.Join(Environment.NewLine, parts);
+        }
+
+        private static CallToolResult CreatePlainTextResult(string text)
+        {
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock { Text = text }
+                }
+            };
         }
 
         private static Dictionary<string, string> ToScopeDictionary(ActiveScopeFilter activeScope)
@@ -923,15 +1148,47 @@ namespace Sarifintown.AgentEngine
             var lines = new List<string>
             {
                 "## SARIF Scoped Query",
-                string.Empty,
-                $"- Total in scope: **{metrics.TotalInScope}**",
-                $"- Returned in batch: **{metrics.ReturnedInBatch}**",
-                $"- Remaining in scope: **{metrics.RemainingInScope}**",
-                $"- Page: **{currentPage} of {totalPages}**",
-                $"- Page size: **{payload.Context.Pagination.PageSize}**",
-                $"- Has more: **{payload.Context.Pagination.HasMore}**",
                 string.Empty
             };
+
+            // Display active filters
+            var activeScope = payload.Context.ActiveScope;
+            if (activeScope.Count > 0)
+            {
+                lines.Add("### Active Filters");
+                foreach (var kvp in activeScope)
+                {
+                    lines.Add($"- **{kvp.Key}**: `{EscapeMarkdown(kvp.Value)}`");
+                }
+
+                lines.Add(string.Empty);
+            }
+            else
+            {
+                lines.Add("### Active Filters");
+                lines.Add("- *(none — showing all findings)*");
+                lines.Add(string.Empty);
+            }
+
+            lines.Add($"- Total in scope: **{metrics.TotalInScope}**");
+            lines.Add($"- Returned in batch: **{metrics.ReturnedInBatch}**");
+            lines.Add($"- Remaining in scope: **{metrics.RemainingInScope}**");
+            lines.Add($"- Page: **{currentPage} of {totalPages}**");
+            lines.Add($"- Page size: **{payload.Context.Pagination.PageSize}**");
+            lines.Add($"- Has more: **{payload.Context.Pagination.HasMore}**");
+            lines.Add(string.Empty);
+
+            // Display top noisy directories
+            if (payload.AvailableFacets?.TopLeafDirectories is { Length: > 0 } dirs)
+            {
+                lines.Add("### Top Directories");
+                foreach (var dir in dirs)
+                {
+                    lines.Add($"- `{EscapeMarkdown(dir)}`");
+                }
+
+                lines.Add(string.Empty);
+            }
 
             if (payload.Context.Pagination.HasMore)
             {
@@ -962,6 +1219,7 @@ namespace Sarifintown.AgentEngine
             lines.Add(string.Empty);
             lines.Add("**STOP:** Wait for explicit user instruction.");
             lines.Add("If the user asks to triage, call `sarif_triage` with `state`, `reason`, and `target` (displayid).");
+            lines.Add("To change filters, call `sarif_filter`.");
             if (payload.Context.Pagination.HasMore)
             {
                 lines.Add($"Optional fetch: if the user explicitly asks for more findings, call `sarif_get` once with `page: {nextPage}` or with `context.pagination.next_page_token`.");
@@ -1434,7 +1692,13 @@ namespace Sarifintown.AgentEngine
             TriageInspectResult? Evidence,
             string? TriagePrompt = null);
 
-        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, bool DebugPrompt = false);
+        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, bool DebugPrompt = false, ScopedAvailableFacets? AvailableFacets = null);
+
+        private sealed record ScopedAvailableFacets(
+            string[] Rules,
+            string[] Severities,
+            string[] Statuses,
+            string[] TopLeafDirectories);
 
         private sealed record ScopedTriagePayload(
             bool Success,

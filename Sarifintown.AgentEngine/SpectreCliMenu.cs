@@ -56,22 +56,23 @@ internal static class SpectreCliMenu
     private static async Task<string> RenderStatusAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifGet(scope: "keep", filter: string.Empty, includeEvidence: false, limit: 10);
+        var result = await SarifTools.SarifGet(includeEvidence: false, limit: 10);
         return RenderDualPurposeText(result);
     }
 
     private static async Task<string> RenderListAsync(CancellationToken cancellationToken)
     {
-        var scope = AnsiConsole.Prompt(
-            new SelectionPrompt<string>()
-                .Title("Scope action")
-                .AddChoices("keep", "set", "refine", "clear"));
-        var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high, rule:SQLI):", string.Empty);
+        var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high rule:SQLI path:controllers):", string.Empty);
         var includeEvidence = AnsiConsole.Confirm("Include evidence?", false);
         var limit = AnsiConsole.Ask<int>("Limit:", 10);
 
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifGet(scope, filter, includeEvidence, limit);
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            await SarifTools.SarifFilter(filter);
+        }
+
+        var result = await SarifTools.SarifGet(includeEvidence, limit);
         return RenderDualPurposeText(result);
     }
 

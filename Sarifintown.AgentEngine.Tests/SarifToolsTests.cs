@@ -67,16 +67,17 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 2);
+                await SarifTools.SarifFilter("severity:high");
+                _ = await SarifTools.SarifGet(limit: 2);
 
-                var secondPage = await SarifTools.SarifGet(scope: "keep", limit: 2);
+                var secondPage = await SarifTools.SarifGet(limit: 2);
                 var secondMeta = JsonSerializer.SerializeToElement(secondPage.Meta);
 
                 Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("2"));
                 Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(2));
                 Assert.That(secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
 
-                var repeatedLastPage = await SarifTools.SarifGet(scope: "keep", limit: 2);
+                var repeatedLastPage = await SarifTools.SarifGet(limit: 2);
                 var repeatedMeta = JsonSerializer.SerializeToElement(repeatedLastPage.Meta);
 
                 Assert.That(repeatedMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("2"));
@@ -122,12 +123,13 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
-                var page2 = await SarifTools.SarifGet(scope: "keep", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                _ = await SarifTools.SarifGet(limit: 10);
+                var page2 = await SarifTools.SarifGet(limit: 10);
                 var page2Meta = JsonSerializer.SerializeToElement(page2.Meta);
                 Assert.That(page2Meta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(2));
 
-                var backToPage1 = await SarifTools.SarifGet(scope: "keep", limit: 10, page: 1);
+                var backToPage1 = await SarifTools.SarifGet(limit: 10, page: 1);
                 var backMeta = JsonSerializer.SerializeToElement(backToPage1.Meta);
 
                 Assert.That(backMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(1));
@@ -173,10 +175,12 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
-                _ = await SarifTools.SarifGet(scope: "keep", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifGet(limit: 10);
 
-                var resetResult = await SarifTools.SarifGet(scope: "set", limit: 10);
+                await SarifTools.SarifFilter("clear");
+                var resetResult = await SarifTools.SarifGet(limit: 10);
                 var resetMeta = JsonSerializer.SerializeToElement(resetResult.Meta);
 
                 Assert.That(resetMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(1));
@@ -192,7 +196,7 @@ namespace Sarifintown.AgentEngine.Tests
         public void SarifGet_WithNegativePage_ThrowsArgumentException()
         {
             Assert.ThrowsAsync<ArgumentException>(async () =>
-                await SarifTools.SarifGet(scope: "keep", page: -1));
+                await SarifTools.SarifGet(page: -1));
         }
 
         [Test]
@@ -229,7 +233,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var firstPage = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 2);
+                await SarifTools.SarifFilter("severity:high");
+                var firstPage = await SarifTools.SarifGet(limit: 2);
                 var firstMeta = JsonSerializer.SerializeToElement(firstPage.Meta);
 
                 Assert.That(firstMeta.GetProperty("context").GetProperty("pagination").GetProperty("has_more").GetBoolean(), Is.True);
@@ -237,7 +242,7 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(firstMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("1"));
                 Assert.That(firstMeta.GetProperty("context").GetProperty("aliases")[1].GetProperty("displayid").GetString(), Is.EqualTo("2"));
 
-                var secondPage = await SarifTools.SarifGet(scope: "keep", limit: 2, pageToken: "2");
+                var secondPage = await SarifTools.SarifGet(limit: 2, pageToken: "2");
                 var secondMeta = JsonSerializer.SerializeToElement(secondPage.Meta);
 
                 Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("has_more").GetBoolean(), Is.False);
@@ -259,7 +264,7 @@ namespace Sarifintown.AgentEngine.Tests
         public void SarifGet_WithInvalidPageToken_ThrowsArgumentException()
         {
             Assert.ThrowsAsync<ArgumentException>(async () =>
-                await SarifTools.SarifGet(scope: "keep", pageToken: "bad-token"));
+                await SarifTools.SarifGet(pageToken: "bad-token"));
         }
 
         [Test]
@@ -291,7 +296,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                var getResult = await SarifTools.SarifGet(limit: 10);
                 var stateContext = JsonSerializer.SerializeToElement(getResult.Meta);
                 var alias = stateContext
                     .GetProperty("context")
@@ -351,7 +357,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithScopeLifecycle_ReturnsScopedEnvelopeAndMetrics()
+        public async Task SarifGet_WithFilterLifecycle_ReturnsScopedEnvelopeAndMetrics()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -400,7 +406,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var setResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                var setResult = await SarifTools.SarifGet(limit: 10);
                 var setMeta = JsonSerializer.SerializeToElement(setResult.Meta);
 
                 Assert.That(setMeta.GetProperty("context").GetProperty("active_scope").GetProperty("severity").GetString(), Is.EqualTo("high"));
@@ -410,13 +417,15 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Scoped Query"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
-                var refineResult = await SarifTools.SarifGet(scope: "refine", filter: "rule:RULE-HIGH", limit: 10);
+                await SarifTools.SarifFilter("severity:high rule:RULE-HIGH");
+                var refineResult = await SarifTools.SarifGet(limit: 10);
                 var refineMeta = JsonSerializer.SerializeToElement(refineResult.Meta);
 
                 Assert.That(refineMeta.GetProperty("context").GetProperty("active_scope").GetProperty("severity").GetString(), Is.EqualTo("high"));
                 Assert.That(refineMeta.GetProperty("context").GetProperty("active_scope").GetProperty("rule").GetString(), Is.EqualTo("RULE-HIGH"));
 
-                var clearResult = await SarifTools.SarifGet(scope: "clear", limit: 10);
+                await SarifTools.SarifFilter("clear");
+                var clearResult = await SarifTools.SarifGet(limit: 10);
                 var clearMeta = JsonSerializer.SerializeToElement(clearResult.Meta);
 
                 Assert.That(clearMeta.GetProperty("context").GetProperty("active_scope").EnumerateObject().Count(), Is.EqualTo(0));
@@ -429,7 +438,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithSetScopeAndNoFilter_DoesNotThrowAndClearsScope()
+        public async Task SarifGet_WithClearedScope_ShowsAllFindings()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -457,9 +466,9 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                _ = await SarifTools.SarifGet(scope: "set", limit: 10);
+                await SarifTools.SarifFilter("clear");
 
-                var result = await SarifTools.SarifGet(scope: "keep", limit: 10);
+                var result = await SarifTools.SarifGet(limit: 10);
                 var meta = JsonSerializer.SerializeToElement(result.Meta);
 
                 Assert.That(meta.GetProperty("context").GetProperty("active_scope").EnumerateObject().Count(), Is.EqualTo(0));
@@ -504,7 +513,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(scope: "keep", includeEvidence: false, limit: 100);
+                var result = await SarifTools.SarifGet(includeEvidence: false, limit: 100);
                 var meta = JsonSerializer.SerializeToElement(result.Meta);
 
                 Assert.That(meta.GetProperty("context").GetProperty("metrics").GetProperty("returned_in_batch").GetInt32(), Is.EqualTo(25));
@@ -554,7 +563,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                await SarifTools.SarifGet(scope: "set", filter: "severity:high");
+                await SarifTools.SarifFilter("severity:high");
+                await SarifTools.SarifGet(limit: 10);
 
                 var triageResult = await SarifTools.SarifTriage(
                     state: "confirmed",
@@ -633,7 +643,7 @@ namespace Sarifintown.AgentEngine.Tests
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToList();
 
-            Assert.That(toolMethods, Is.EqualTo(new[] { "SarifGet", "SarifTriage" }));
+            Assert.That(toolMethods, Is.EqualTo(new[] { "SarifFilter", "SarifGet", "SarifTriage" }));
         }
 
         [Test]
@@ -670,13 +680,15 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var firstGet = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                var firstGet = await SarifTools.SarifGet(limit: 10);
                 var firstMeta = JsonSerializer.SerializeToElement(firstGet.Meta);
                 var firstAlias = firstMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
                 Assert.That(firstAlias, Is.EqualTo("1"));
 
-                var secondGet = await SarifTools.SarifGet(scope: "set", filter: "severity:medium", limit: 10);
+                await SarifTools.SarifFilter("severity:medium");
+                var secondGet = await SarifTools.SarifGet(limit: 10);
                 var secondMeta = JsonSerializer.SerializeToElement(secondGet.Meta);
                 var secondAlias = secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
@@ -727,7 +739,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true, debugPrompt: true);
+                var result = await SarifTools.SarifGet(includeEvidence: true, debugPrompt: true);
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
@@ -768,7 +780,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: false, debugPrompt: false);
+                var result = await SarifTools.SarifGet(includeEvidence: false, debugPrompt: false);
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
@@ -808,7 +820,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                var getResult = await SarifTools.SarifGet(limit: 10);
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
@@ -900,7 +913,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                await SarifTools.SarifFilter("severity:high");
+                var getResult = await SarifTools.SarifGet(limit: 10);
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
@@ -961,7 +975,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true);
+                var result = await SarifTools.SarifGet(includeEvidence: true);
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
@@ -1002,7 +1016,7 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true);
+                var result = await SarifTools.SarifGet(includeEvidence: true);
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
