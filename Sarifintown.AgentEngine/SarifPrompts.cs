@@ -37,16 +37,12 @@ public static class SarifPrompts
     /// Builds a slash-command prompt for reading SARIF findings with current filters.
     /// </summary>
     [McpServerPrompt(Name = "sarif_get", Title = "Get Triage Posture")]
-    [Description("Retrieve posture summary and prioritized findings using the active filter. Use includeEvidence=true to also get assembled triage guidance per finding.")]
+    [Description("Retrieve posture summary and prioritized findings using the active filter.")]
     public static string TriageQueryPrompt(
         [Description("Maximum finding count to return.")]
         int limit = 10,
         [Description("Optional 1-based page number. When provided, it overrides automatic pagination and pageToken.")]
         int page = 0,
-        [Description("When true, include evidence and triage prompt per finding.")]
-        bool includeEvidence = false,
-        [Description("When true, append assembled prompt text for debugging.")]
-        bool debugPrompt = false,
         [Description("Optional pagination token returned by a previous sarif_get response.")]
         string pageToken = "")
     {
@@ -54,7 +50,7 @@ public static class SarifPrompts
 
         return $"""
             EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` with includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, page={page}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}, pageToken='{pageToken}'.
+            1. Call `sarif_get` with limit={safeLimit}, page={page}, pageToken='{pageToken}'.
             2. Output exactly one <vulnerability_report> block VERBATIM. Do NOT summarize, interpret, duplicate, or append extra text.
             3. STOP immediately and wait for explicit user instruction.
             """;

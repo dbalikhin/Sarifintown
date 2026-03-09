@@ -56,14 +56,13 @@ internal static class SpectreCliMenu
     private static async Task<string> RenderStatusAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifGet(includeEvidence: false, limit: 10);
+        var result = await SarifTools.SarifGet(limit: 10);
         return RenderDualPurposeText(result);
     }
 
     private static async Task<string> RenderListAsync(CancellationToken cancellationToken)
     {
         var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high rule:SQLI path:controllers):", string.Empty);
-        var includeEvidence = AnsiConsole.Confirm("Include evidence?", false);
         var limit = AnsiConsole.Ask<int>("Limit:", 10);
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -72,7 +71,7 @@ internal static class SpectreCliMenu
             await SarifTools.SarifFilter(filter);
         }
 
-        var result = await SarifTools.SarifGet(includeEvidence, limit);
+        var result = await SarifTools.SarifGet(limit: limit);
         return RenderDualPurposeText(result);
     }
 

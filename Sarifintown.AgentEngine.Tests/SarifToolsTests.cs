@@ -351,6 +351,8 @@ namespace Sarifintown.AgentEngine.Tests
             SetInternalSarifToolsProperty("SnippetCache", null);
             SetInternalSarifToolsProperty("SnippetWarmupService", null);
             SetInternalSarifToolsProperty("PromptAssembly", null);
+            SarifTools.SetDebugPromptEnabled(false);
+            SarifTools.SetIncludeEvidenceByDefault(true);
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
             SarifTools.SetLocalUiBaseUrl(string.Empty);
             SarifTools.SetWorkspaceRoot(Directory.GetCurrentDirectory());
@@ -513,7 +515,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(includeEvidence: false, limit: 100);
+                SarifTools.SetIncludeEvidenceByDefault(false);
+                var result = await SarifTools.SarifGet(limit: 100);
                 var meta = JsonSerializer.SerializeToElement(result.Meta);
 
                 Assert.That(meta.GetProperty("context").GetProperty("metrics").GetProperty("returned_in_batch").GetInt32(), Is.EqualTo(25));
@@ -739,7 +742,10 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(includeEvidence: true, debugPrompt: true);
+                SarifTools.SetDebugPromptEnabled(true);
+
+                SarifTools.SetIncludeEvidenceByDefault(true);
+                var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
@@ -780,7 +786,10 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(includeEvidence: false, debugPrompt: false);
+                SarifTools.SetDebugPromptEnabled(false);
+
+                SarifTools.SetIncludeEvidenceByDefault(false);
+                var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
@@ -975,7 +984,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(includeEvidence: true);
+                SarifTools.SetIncludeEvidenceByDefault(true);
+                var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
@@ -1016,7 +1026,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                var result = await SarifTools.SarifGet(includeEvidence: true);
+                SarifTools.SetIncludeEvidenceByDefault(true);
+                var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));

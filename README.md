@@ -81,8 +81,11 @@ Example `.sarif/engine.json`:
 {
   "Preload": {
     "Strategy": "LatestPerTool",
-    "EnableSnippetPreload": true,
-    "MaxPreloadedSnippets": 50
+    "EnableSnippetPreload": true
+  },
+  "Server": {
+    "EnableDebugPrompt": false,
+    "IncludeEvidenceByDefault": true
   }
 }
 ```
@@ -91,7 +94,10 @@ Equivalent environment variables:
 
 - `SARIFINTOWN_Preload__Strategy` = `None` | `LatestPerTool` | `All`
 - `SARIFINTOWN_Preload__EnableSnippetPreload` = `true` | `false`
-- `SARIFINTOWN_Preload__MaxPreloadedSnippets` = integer
+- `SARIFINTOWN_Server__EnableDebugPrompt` = `true` | `false`
+- `SARIFINTOWN_Server__IncludeEvidenceByDefault` = `true` | `false`
+
+Snippet preload bootstraps the first 10 findings at startup, then preloads remaining findings in the background.
 
 ## License
 

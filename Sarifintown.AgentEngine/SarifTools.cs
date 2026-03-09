@@ -34,6 +34,8 @@ namespace Sarifintown.AgentEngine
         private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
         private static int _nextDisplayId = 1;
+        private static bool _debugPromptEnabled;
+        private static bool _includeEvidenceByDefault = true;
         private static HashSet<string> _availableSeverities = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableRules = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableStatuses = new(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
@@ -106,6 +108,28 @@ namespace Sarifintown.AgentEngine
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                     .ToList();
+            }
+        }
+
+        /// <summary>
+        /// Enables or disables prompt debug mode for `sarif_get` at server startup.
+        /// </summary>
+        public static void SetDebugPromptEnabled(bool enabled)
+        {
+            lock (SyncRoot)
+            {
+                _debugPromptEnabled = enabled;
+            }
+        }
+
+        /// <summary>
+        /// Sets the default evidence inclusion behavior for `sarif_get` at server startup.
+        /// </summary>
+        public static void SetIncludeEvidenceByDefault(bool enabled)
+        {
+            lock (SyncRoot)
+            {
+                _includeEvidenceByDefault = enabled;
             }
         }
 
@@ -199,21 +223,25 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters.")]
+        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. Evidence inclusion and debug prompt output are controlled only by server startup settings. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters.")]
         public static async Task<CallToolResult> SarifGet(
-            [Description("When true, attach evidence blocks and assembled triage prompt per finding.")]
-            bool includeEvidence = false,
             [Description("Maximum findings to return (1-25).")]
             int limit = 10,
             [Description("Optional 1-based page number. When provided, this overrides automatic pagination and pageToken.")]
             int page = 0,
-            [Description("When true, append the fully assembled triage prompt text to the output for debugging.")]
-            bool debugPrompt = false,
             [Description("Optional pagination token returned by a previous sarif_get call. Use context.pagination.next_page_token to fetch the next batch.")]
             string pageToken = "")
         {
             var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
-            var payload = await ExecutePureGetAsync(includeEvidence, safeLimit, page, debugPrompt, pageToken);
+            bool debugPromptEnabled;
+            bool includeEvidenceByDefault;
+            lock (SyncRoot)
+            {
+                debugPromptEnabled = _debugPromptEnabled;
+                includeEvidenceByDefault = _includeEvidenceByDefault;
+            }
+
+            var payload = await ExecutePureGetAsync(includeEvidenceByDefault, safeLimit, page, debugPromptEnabled, pageToken);
             var stateContext = new
             {
                 context = new
@@ -225,6 +253,7 @@ namespace Sarifintown.AgentEngine
                         returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
                         remaining_in_scope = payload.Context.Metrics.RemainingInScope
                     },
+                    snippet_preload_status = payload.Context.SnippetPreloadStatus,
                     pagination = new
                     {
                         page_token = payload.Context.Pagination.PageToken,
@@ -379,6 +408,7 @@ namespace Sarifintown.AgentEngine
             }
 
             var workflow = CreateTriageWorkflowService();
+            var snippetPreloadStatus = await ResolveSnippetPreloadStatusAsync().ConfigureAwait(false);
 
             var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
 
@@ -493,10 +523,28 @@ namespace Sarifintown.AgentEngine
                     "Results are filtered by the persistent Active Scope. Use sarif_filter to change filters.",
                     ToScopeDictionary(activeScope),
                     new ScopedMetrics(metrics.TotalInScope, metrics.ReturnedInBatch, metrics.RemainingInScope),
+                    snippetPreloadStatus,
                     pagination),
                 findingRows,
                 debugPrompt,
                 availableFacets);
+        }
+
+        private static async Task<string> ResolveSnippetPreloadStatusAsync()
+        {
+            var warmupService = SnippetWarmupService;
+            if (warmupService == null)
+            {
+                return "unavailable";
+            }
+
+            var status = warmupService.GetPreloadStatus();
+            if (status.State == SnippetPreloadState.InProgress)
+            {
+                status = await warmupService.WaitForPreloadAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+            }
+
+            return status.Message;
         }
 
         /// <summary>
@@ -967,6 +1015,7 @@ namespace Sarifintown.AgentEngine
                         returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
                         remaining_in_scope = payload.Context.Metrics.RemainingInScope
                     },
+                    snippet_preload_status = payload.Context.SnippetPreloadStatus,
                     pagination = new
                     {
                         page_token = payload.Context.Pagination.PageToken,
@@ -1173,6 +1222,7 @@ namespace Sarifintown.AgentEngine
             lines.Add($"- Total in scope: **{metrics.TotalInScope}**");
             lines.Add($"- Returned in batch: **{metrics.ReturnedInBatch}**");
             lines.Add($"- Remaining in scope: **{metrics.RemainingInScope}**");
+            lines.Add($"- Snippet preload status: **{payload.Context.SnippetPreloadStatus}**");
             lines.Add($"- Page: **{currentPage} of {totalPages}**");
             lines.Add($"- Page size: **{payload.Context.Pagination.PageSize}**");
             lines.Add($"- Has more: **{payload.Context.Pagination.HasMore}**");
@@ -1434,8 +1484,7 @@ namespace Sarifintown.AgentEngine
                 Options.Create(new SarifPreloadOptions
                 {
                     Strategy = PreloadStrategy.LatestPerTool,
-                    EnableSnippetPreload = false,
-                    MaxPreloadedSnippets = 0
+                    EnableSnippetPreload = false
                 }),
                 workspaceRoot,
                 discoveredFiles);
@@ -1677,6 +1726,7 @@ namespace Sarifintown.AgentEngine
             string Notice,
             IReadOnlyDictionary<string, string> ActiveScope,
             ScopedMetrics Metrics,
+            string SnippetPreloadStatus,
             ScopedPagination Pagination);
 
         private sealed record ScopedLocation(string File, int? Line);

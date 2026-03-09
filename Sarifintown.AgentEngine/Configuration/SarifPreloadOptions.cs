@@ -14,6 +14,4 @@ internal sealed class SarifPreloadOptions
     public PreloadStrategy Strategy { get; set; } = PreloadStrategy.LatestPerTool;
 
     public bool EnableSnippetPreload { get; set; } = true;
-
-    public int MaxPreloadedSnippets { get; set; } = 50;
 }

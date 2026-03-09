@@ -316,7 +316,12 @@ You can tune SARIF preload behavior and startup snippet warmup directly from MCP
 
 - `SARIFINTOWN_Preload__Strategy`: `None`, `LatestPerTool`, or `All`
 - `SARIFINTOWN_Preload__EnableSnippetPreload`: `true`/`false`
-- `SARIFINTOWN_Preload__MaxPreloadedSnippets`: integer
+- `SARIFINTOWN_Server__EnableDebugPrompt`: `true`/`false` (default `false`)
+- `SARIFINTOWN_Server__IncludeEvidenceByDefault`: `true`/`false` (default `true`)
+
+`SARIFINTOWN_Server__EnableDebugPrompt` and `SARIFINTOWN_Server__IncludeEvidenceByDefault` are evaluated only at MCP server startup. They cannot be changed from MCP prompts or slash-command arguments.
+
+Snippet preload bootstrap is fixed to the first 10 findings during startup. Remaining findings are preloaded in the background.
 
 Example (global tool invocation preserved):
 
@@ -332,7 +337,8 @@ Example (global tool invocation preserved):
         "PROJECT_ROOT": "C:/dev/my-app",
         "SARIFINTOWN_Preload__Strategy": "LatestPerTool",
         "SARIFINTOWN_Preload__EnableSnippetPreload": "true",
-        "SARIFINTOWN_Preload__MaxPreloadedSnippets": "50"
+        "SARIFINTOWN_Server__EnableDebugPrompt": "false",
+        "SARIFINTOWN_Server__IncludeEvidenceByDefault": "true"
       }
     }
   }

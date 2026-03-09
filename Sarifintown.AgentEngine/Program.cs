@@ -27,6 +27,7 @@ TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
 };
 
 var builder = WebApplication.CreateSlimBuilder(args);
+const int InitialSnippetPreloadCount = 10;
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options =>
 {
@@ -53,6 +54,8 @@ builder.Configuration
 
 builder.Services.Configure<SarifPreloadOptions>(
     builder.Configuration.GetSection(SarifPreloadOptions.SectionName));
+builder.Services.Configure<SarifServerOptions>(
+    builder.Configuration.GetSection(SarifServerOptions.SectionName));
 
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
@@ -100,6 +103,7 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
 var preloadOptions = app.Services.GetRequiredService<IOptions<SarifPreloadOptions>>().Value;
+var serverOptions = app.Services.GetRequiredService<IOptions<SarifServerOptions>>().Value;
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -111,6 +115,8 @@ SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyServi
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
+SarifTools.SetDebugPromptEnabled(serverOptions.EnableDebugPrompt);
+SarifTools.SetIncludeEvidenceByDefault(serverOptions.IncludeEvidenceByDefault);
 await RunStartupStageAsync("Available facets initialization", () => SarifTools.InitializeAvailableFacetsAsync());
 WriteStartupInfo("MCP tool dependencies configured.");
 
@@ -118,11 +124,17 @@ await RunStartupStageAsync("Web host start", () => app.StartAsync());
 
 if (preloadOptions.EnableSnippetPreload)
 {
+    await RunStartupStageAsync(
+        $"Snippet preload bootstrap ({InitialSnippetPreloadCount})",
+        () => snippetWarmupService.PreloadSnippetsAsync(InitialSnippetPreloadCount, app.Lifetime.ApplicationStopping));
+    var bootstrapPreloadStatus = snippetWarmupService.GetPreloadStatus();
+    WriteStartupInfo($"Snippet preload bootstrap status: '{bootstrapPreloadStatus.Message}'");
+
     _ = RunSnippetPreloadInBackgroundAsync(
         snippetWarmupService,
-        preloadOptions.MaxPreloadedSnippets,
+        InitialSnippetPreloadCount,
         app.Lifetime.ApplicationStopping);
-    WriteStartupInfo($"Snippet preload ({preloadOptions.MaxPreloadedSnippets} max): scheduled in background");
+    WriteStartupInfo($"Snippet preload bootstrap ({InitialSnippetPreloadCount}) completed; remaining preload scheduled in background");
 }
 
 static async ValueTask<CompleteResult> HandleCompletionRequestAsync(
@@ -190,8 +202,6 @@ static IReadOnlyList<string> ResolveCompletionValues(
         },
         "sarif_get" => normalizedArgument switch
         {
-            "includeEvidence" => new[] { "true", "false" },
-            "debugPrompt" => new[] { "true", "false" },
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },
@@ -315,7 +325,7 @@ await app.WaitForShutdownAsync();
 
 static async Task RunSnippetPreloadInBackgroundAsync(
     SnippetWarmupService snippetWarmupService,
-    int maxPreloadedSnippets,
+    int alreadyPreloadedFindings,
     CancellationToken cancellationToken)
 {
     ArgumentNullException.ThrowIfNull(snippetWarmupService);
@@ -323,8 +333,10 @@ static async Task RunSnippetPreloadInBackgroundAsync(
     try
     {
         await RunStartupStageAsync(
-            $"Snippet preload ({maxPreloadedSnippets} max)",
-            () => snippetWarmupService.PreloadSnippetsAsync(maxPreloadedSnippets, cancellationToken));
+            "Snippet preload (remaining findings)",
+            () => snippetWarmupService.PreloadRemainingSnippetsAsync(alreadyPreloadedFindings, cancellationToken));
+        var backgroundPreloadStatus = snippetWarmupService.GetPreloadStatus();
+        WriteStartupInfo($"Snippet preload background status: '{backgroundPreloadStatus.Message}'");
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {
