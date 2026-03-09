@@ -57,7 +57,7 @@ builder.Services.Configure<SarifPreloadOptions>(
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
-builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService(discovery.WorkspaceRoot));
+builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService());
 builder.Services.AddSingleton<SnippetCacheService>();
 builder.Services.AddSingleton<SarifStateService>(serviceProvider =>
     new SarifStateService(
@@ -107,6 +107,7 @@ SarifTools.TreeSitterEngine = treeSitter;
 SarifTools.StateService = sarifStateService;
 SarifTools.SnippetCache = snippetCacheService;
 SarifTools.SnippetWarmupService = snippetWarmupService;
+SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyService>();
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
@@ -185,6 +186,7 @@ static IReadOnlyList<string> ResolveCompletionValues(
         {
             "scope" => new[] { "keep", "set", "refine", "clear" },
             "includeEvidence" => new[] { "true", "false" },
+            "debugPrompt" => new[] { "true", "false" },
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },

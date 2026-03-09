@@ -34,6 +34,235 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
+        public async Task SarifGet_WithKeepAndNoPageToken_AutoAdvancesWithinSameScope()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 3).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "keep-auto-advance.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 2);
+
+                var secondPage = await SarifTools.SarifGet(scope: "keep", limit: 2);
+                var secondMeta = JsonSerializer.SerializeToElement(secondPage.Meta);
+
+                Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("2"));
+                Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(2));
+                Assert.That(secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
+
+                var repeatedLastPage = await SarifTools.SarifGet(scope: "keep", limit: 2);
+                var repeatedMeta = JsonSerializer.SerializeToElement(repeatedLastPage.Meta);
+
+                Assert.That(repeatedMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("2"));
+                Assert.That(repeatedMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithExplicitPage_CanNavigateBackToFirstPage()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 25).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "explicit-page-nav.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                var page2 = await SarifTools.SarifGet(scope: "keep", limit: 10);
+                var page2Meta = JsonSerializer.SerializeToElement(page2.Meta);
+                Assert.That(page2Meta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(2));
+
+                var backToPage1 = await SarifTools.SarifGet(scope: "keep", limit: 10, page: 1);
+                var backMeta = JsonSerializer.SerializeToElement(backToPage1.Meta);
+
+                Assert.That(backMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(1));
+                Assert.That(backMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("1"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithScopeSet_ResetsPaginationToFirstPageByDefault()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 25).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "set-resets-page.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                _ = await SarifTools.SarifGet(scope: "keep", limit: 10);
+
+                var resetResult = await SarifTools.SarifGet(scope: "set", limit: 10);
+                var resetMeta = JsonSerializer.SerializeToElement(resetResult.Meta);
+
+                Assert.That(resetMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_number").GetInt32(), Is.EqualTo(1));
+                Assert.That(resetMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("0"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public void SarifGet_WithNegativePage_ThrowsArgumentException()
+        {
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await SarifTools.SarifGet(scope: "keep", page: -1));
+        }
+
+        [Test]
+        public async Task SarifGet_WithPageToken_ReturnsNextBatchWithoutDisplayIdOverlap()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 3).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "cursor-pagination.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var firstPage = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 2);
+                var firstMeta = JsonSerializer.SerializeToElement(firstPage.Meta);
+
+                Assert.That(firstMeta.GetProperty("context").GetProperty("pagination").GetProperty("has_more").GetBoolean(), Is.True);
+                Assert.That(firstMeta.GetProperty("context").GetProperty("pagination").GetProperty("next_page_token").GetString(), Is.EqualTo("2"));
+                Assert.That(firstMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("1"));
+                Assert.That(firstMeta.GetProperty("context").GetProperty("aliases")[1].GetProperty("displayid").GetString(), Is.EqualTo("2"));
+
+                var secondPage = await SarifTools.SarifGet(scope: "keep", limit: 2, pageToken: "2");
+                var secondMeta = JsonSerializer.SerializeToElement(secondPage.Meta);
+
+                Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("has_more").GetBoolean(), Is.False);
+                Assert.That(secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
+
+                var triageResult = await SarifTools.SarifTriage(state: "confirmed", reason: "page-token", target: "1");
+                var triageText = triageResult.Content[0] as TextContentBlock;
+
+                Assert.That(triageText, Is.Not.Null);
+                Assert.That(triageText!.Text, Contains.Substring("Affected findings: **1**"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public void SarifGet_WithInvalidPageToken_ThrowsArgumentException()
+        {
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await SarifTools.SarifGet(scope: "keep", pageToken: "bad-token"));
+        }
+
+        [Test]
         public async Task SarifTriage_WithDisplayAliasTarget_ResolvesToUnderlyingFindingId()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
@@ -100,10 +329,9 @@ namespace Sarifintown.AgentEngine.Tests
 
             public Task InitializeAsync() => Task.CompletedTask;
 
-            public Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine)
+            public Task<string> ExtractMethodAsync(string sourceCode, string language, int startLine, int endLine, CancellationToken cancellationToken = default)
             {
-                Interlocked.Increment(ref _extractMethodCallCount);
-                return Task.FromResult("extracted_code_snippet");
+                return Task.FromResult($"Extracted: {language} from {startLine} to {endLine}");
             }
         }
 
@@ -116,6 +344,7 @@ namespace Sarifintown.AgentEngine.Tests
             SetInternalSarifToolsProperty("StateService", null);
             SetInternalSarifToolsProperty("SnippetCache", null);
             SetInternalSarifToolsProperty("SnippetWarmupService", null);
+            SetInternalSarifToolsProperty("PromptAssembly", null);
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
             SarifTools.SetLocalUiBaseUrl(string.Empty);
             SarifTools.SetWorkspaceRoot(Directory.GetCurrentDirectory());
@@ -176,6 +405,8 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(setMeta.GetProperty("context").GetProperty("active_scope").GetProperty("severity").GetString(), Is.EqualTo("high"));
                 Assert.That(setMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(1));
+                Assert.That(setMeta.GetProperty("pause").GetBoolean(), Is.True);
+                Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_triage"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Scoped Query"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
@@ -190,6 +421,93 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(clearMeta.GetProperty("context").GetProperty("active_scope").EnumerateObject().Count(), Is.EqualTo(0));
                 Assert.That(clearMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(2));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithSetScopeAndNoFilter_DoesNotThrowAndClearsScope()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "set-no-filter.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-ONE",
+                      "level": "error",
+                      "message": { "text": "one" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(scope: "set", limit: 10);
+
+                var result = await SarifTools.SarifGet(scope: "keep", limit: 10);
+                var meta = JsonSerializer.SerializeToElement(result.Meta);
+
+                Assert.That(meta.GetProperty("context").GetProperty("active_scope").EnumerateObject().Count(), Is.EqualTo(0));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithLargeLimit_CapsReturnedBatchToHardLimit()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 30).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "hard-limit.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "keep", includeEvidence: false, limit: 100);
+                var meta = JsonSerializer.SerializeToElement(result.Meta);
+
+                Assert.That(meta.GetProperty("context").GetProperty("metrics").GetProperty("returned_in_batch").GetInt32(), Is.EqualTo(25));
             }
             finally
             {
@@ -316,6 +634,383 @@ namespace Sarifintown.AgentEngine.Tests
                 .ToList();
 
             Assert.That(toolMethods, Is.EqualTo(new[] { "SarifGet", "SarifTriage" }));
+        }
+
+        [Test]
+        public async Task SarifGet_WhenScopeSetTwice_PreservesGlobalDisplayIdSequence()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "displayid-reset.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-A",
+                      "level": "error",
+                      "message": { "text": "finding A" }
+                    },
+                    {
+                      "ruleId": "RULE-B",
+                      "level": "warning",
+                      "message": { "text": "finding B" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var firstGet = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                var firstMeta = JsonSerializer.SerializeToElement(firstGet.Meta);
+                var firstAlias = firstMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                Assert.That(firstAlias, Is.EqualTo("1"));
+
+                var secondGet = await SarifTools.SarifGet(scope: "set", filter: "severity:medium", limit: 10);
+                var secondMeta = JsonSerializer.SerializeToElement(secondGet.Meta);
+                var secondAlias = secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                Assert.That(secondAlias, Is.EqualTo("2"), "DisplayId should stay globally unique across scope changes");
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithDebugPromptTrue_IncludesDebugSection()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
+            Directory.CreateDirectory(promptsDir);
+            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Test Core Directive");
+            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Test Output Format");
+            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
+            Directory.CreateDirectory(categoriesDir);
+            File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Test Default SAST");
+
+            var sarifPath = Path.Combine(sarifDirectory, "debug-prompt.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-DEBUG",
+                      "level": "error",
+                      "message": { "text": "debug test finding" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
+                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true, debugPrompt: true);
+                var text = ((TextContentBlock)result.Content[0]).Text;
+
+                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Contains.Substring("# Test Core Directive"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithDebugPromptFalse_OmitsDebugSection()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "no-debug.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-NODEBUG",
+                      "level": "error",
+                      "message": { "text": "no debug" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: false, debugPrompt: false);
+                var text = ((TextContentBlock)result.Content[0]).Text;
+
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifTriage_WithSingleTarget_ShowsModifiedFindingsSection()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "modified-detail.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-DETAIL",
+                      "level": "error",
+                      "message": { "text": "detail finding" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                var meta = JsonSerializer.SerializeToElement(getResult.Meta);
+                var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                var triageResult = await SarifTools.SarifTriage(
+                    state: "false_positive",
+                    reason: "test code only",
+                    target: displayId!);
+
+                var triageText = triageResult.Content[0] as TextContentBlock;
+                Assert.That(triageText, Is.Not.Null);
+                Assert.That(triageText!.Text, Contains.Substring("### Modified Findings"));
+                Assert.That(triageText.Text, Contains.Substring($"`{displayId}`"));
+                Assert.That(triageText.Text, Contains.Substring("`FP`"));
+                Assert.That(triageText.Text, Contains.Substring("Original reasoning: test code only"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifTriage_WithPromptAssemblyAndDataFlow_IncludesEvidenceWithoutPromptProvenance()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sourceDirectory = Path.Combine(workspace, "src");
+            Directory.CreateDirectory(sourceDirectory);
+            File.WriteAllText(Path.Combine(sourceDirectory, "flow.cs"), "public class Flow { public void Execute(string user) { var sql = \"select \" + user; } }");
+
+            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
+            Directory.CreateDirectory(promptsDir);
+            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Test Core Directive");
+            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Test Output Format");
+            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
+            Directory.CreateDirectory(categoriesDir);
+            File.WriteAllText(Path.Combine(categoriesDir, "sast-sqli.md"), "# Test SQLI Category");
+
+            var sarifPath = Path.Combine(sarifDirectory, "triage-evidence.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "SQLI-RULE",
+                      "level": "error",
+                      "message": { "text": "user input reaches SQL sink" },
+                      "locations": [
+                        {
+                          "physicalLocation": {
+                            "artifactLocation": { "uri": "src/flow.cs" },
+                            "region": { "startLine": 1 }
+                          }
+                        }
+                      ],
+                      "codeFlows": [
+                        {
+                          "threadFlows": [
+                            {
+                              "locations": [
+                                {
+                                  "location": {
+                                    "message": { "text": "source" },
+                                    "physicalLocation": {
+                                      "artifactLocation": { "uri": "src/flow.cs" },
+                                      "region": { "startLine": 1 }
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
+                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
+
+            try
+            {
+                var getResult = await SarifTools.SarifGet(scope: "set", filter: "severity:high", limit: 10);
+                var meta = JsonSerializer.SerializeToElement(getResult.Meta);
+                var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                var triageResult = await SarifTools.SarifTriage(
+                    state: "confirmed",
+                    reason: "confirmed-from-flow",
+                    target: displayId!);
+
+                var triageText = ((TextContentBlock)triageResult.Content[0]).Text;
+                Assert.That(triageText, Contains.Substring("### Decision Evidence"));
+                Assert.That(triageText, Contains.Substring("##### Data Flow Used"));
+                Assert.That(triageText, Contains.Substring("Original reasoning: confirmed-from-flow"));
+                Assert.That(triageText, Does.Not.Contain("##### Prompt Provenance"));
+                Assert.That(triageText, Does.Not.Contain("# Test Core Directive"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithIncludeEvidence_OmitsTriageGuidanceByDefault()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
+            Directory.CreateDirectory(promptsDir);
+            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Core Directive");
+            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Output Format");
+            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
+            Directory.CreateDirectory(categoriesDir);
+            File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Default SAST Category");
+
+            var sarifPath = Path.Combine(sarifDirectory, "evidence-guidance.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-GUIDANCE",
+                      "level": "error",
+                      "message": { "text": "guidance test" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
+                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true);
+                var text = ((TextContentBlock)result.Content[0]).Text;
+
+                Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
+                Assert.That(text, Does.Not.Contain("# Core Directive"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifGet_WithoutPromptAssembly_OmitsTriageGuidance()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "no-prompt.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-NOPROMPT",
+                      "level": "error",
+                      "message": { "text": "no prompt test" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                var result = await SarifTools.SarifGet(scope: "set", filter: "severity:high", includeEvidence: true);
+                var text = ((TextContentBlock)result.Content[0]).Text;
+
+                Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
         }
 
         private static void SetInternalSarifToolsProperty(string propertyName, object? value)

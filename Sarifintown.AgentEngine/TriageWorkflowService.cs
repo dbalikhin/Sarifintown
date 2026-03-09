@@ -7,6 +7,7 @@ namespace Sarifintown.AgentEngine;
 
 internal sealed class TriageWorkflowService
 {
+    private static readonly TimeSpan TreeSitterExtractionTimeout = TimeSpan.FromSeconds(2);
     private readonly IFileReader _fileReader;
     private readonly ITreeSitterEngine _treeSitterEngine;
     private readonly SarifStateService _stateService;
@@ -118,7 +119,59 @@ internal sealed class TriageWorkflowService
             return null;
         }
 
+        return await BuildInspectResultAsync(finding, resolvedEvidenceMode, cancellationToken);
+    }
+
+    public async Task<IReadOnlyDictionary<string, TriageInspectResult>> InspectManyAsync(
+        IEnumerable<string> findingIds,
+        string evidenceMode = "",
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(findingIds);
+
+        var orderedIds = findingIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (orderedIds.Count == 0)
+        {
+            return new Dictionary<string, TriageInspectResult>(StringComparer.Ordinal);
+        }
+
+        var resolvedEvidenceMode = ParseEvidenceMode(evidenceMode);
+        var findings = await LoadFindingsAsync(cancellationToken);
+        var findingsById = findings.ToDictionary(item => item.FindingId, StringComparer.Ordinal);
+
+        var results = new Dictionary<string, TriageInspectResult>(StringComparer.Ordinal);
+        foreach (var findingId in orderedIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!findingsById.TryGetValue(findingId, out var finding))
+            {
+                continue;
+            }
+
+            var result = await BuildInspectResultAsync(finding, resolvedEvidenceMode, cancellationToken);
+            results[findingId] = result;
+        }
+
+        return results;
+    }
+
+    private async Task<TriageInspectResult> BuildInspectResultAsync(
+        TriageFindingEnvelope finding,
+        TriageEvidenceMode resolvedEvidenceMode,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+
         var steps = new List<TriageInspectStep>();
+        var sourceCodeCache = new Dictionary<string, string>(
+            OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal);
         var flowLocations = finding.Result.CodeFlows?
             .SelectMany(flow => flow.ThreadFlows ?? new List<ThreadFlow>())
             .SelectMany(threadFlow => threadFlow.Locations ?? new List<ThreadFlowLocation>())
@@ -135,7 +188,12 @@ internal sealed class TriageWorkflowService
             }
 
             var resolvedPath = ResolveFindingPath(finding, physicalLocation.ArtifactLocation);
-            var snippet = await ExtractSnippetAsync(resolvedPath, physicalLocation.Region, resolvedEvidenceMode, cancellationToken);
+            var snippet = await ExtractSnippetAsync(
+                resolvedPath,
+                physicalLocation.Region,
+                resolvedEvidenceMode,
+                sourceCodeCache,
+                cancellationToken).ConfigureAwait(false);
 
             steps.Add(new TriageInspectStep(
                 index + 1,
@@ -145,7 +203,7 @@ internal sealed class TriageWorkflowService
                 snippet));
         }
 
-        var evidenceBlocks = await BuildEvidenceBlocksAsync(finding, steps, resolvedEvidenceMode, cancellationToken);
+        var evidenceBlocks = await BuildEvidenceBlocksAsync(finding, steps, resolvedEvidenceMode, sourceCodeCache, cancellationToken);
 
         return new TriageInspectResult(
             finding.FindingId,
@@ -170,6 +228,7 @@ internal sealed class TriageWorkflowService
         TriageFindingEnvelope finding,
         IReadOnlyList<TriageInspectStep> steps,
         TriageEvidenceMode mode,
+        IDictionary<string, string> sourceCodeCache,
         CancellationToken cancellationToken)
     {
         if (steps.Count == 0)
@@ -209,7 +268,7 @@ internal sealed class TriageWorkflowService
 
             var first = blockSteps[0];
             var last = blockSteps[^1];
-            var snippet = await ResolveBlockSnippetAsync(finding, blockSteps, mode, cancellationToken);
+            var snippet = await ResolveBlockSnippetAsync(finding, blockSteps, mode, sourceCodeCache, cancellationToken);
 
             groupedBlocks.Add(new TriageEvidenceBlock(
                 first.Index,
@@ -231,6 +290,7 @@ internal sealed class TriageWorkflowService
         TriageFindingEnvelope finding,
         IReadOnlyList<TriageInspectStep> blockSteps,
         TriageEvidenceMode mode,
+        IDictionary<string, string> sourceCodeCache,
         CancellationToken cancellationToken)
     {
         if (blockSteps.Count == 0)
@@ -253,13 +313,13 @@ internal sealed class TriageWorkflowService
             finding,
             new PhysicalLocation.PhysicalLocationArtifactLocation { Uri = firstPath });
 
-        if (string.IsNullOrWhiteSpace(resolvedPath) || !File.Exists(resolvedPath))
+        if (string.IsNullOrWhiteSpace(resolvedPath))
         {
             return blockSteps[0].CodeSnippet;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var sourceCode = await _fileReader.ReadFileAsync(resolvedPath);
+        var sourceCode = await GetSourceCodeAsync(resolvedPath, sourceCodeCache).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(sourceCode))
         {
             return blockSteps[0].CodeSnippet;
@@ -683,34 +743,12 @@ internal sealed class TriageWorkflowService
         string sourcePath,
         Region? region,
         TriageEvidenceMode evidenceMode,
+        IDictionary<string, string>? sourceCodeCache,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
         {
             return "Source file unavailable";
-        }
-
-        var sourceCode = await _fileReader.ReadFileAsync(sourcePath);
-        if (string.IsNullOrWhiteSpace(sourceCode))
-        {
-            return string.Empty;
-        }
-
-        if (evidenceMode is TriageEvidenceMode.LineWindowStrict or TriageEvidenceMode.LineWindowConcatenated)
-        {
-            var windowStart = region?.StartLine ?? 1;
-            var windowEnd = region?.EndLine > 0 ? region.EndLine : windowStart;
-            var windowCacheKey = BuildSnippetCacheKey(sourcePath, windowStart, windowEnd, ToEvidenceModeValue(evidenceMode));
-
-            if (_snippetCache != null && _snippetCache.TryGet(windowCacheKey, out var cachedWindowSnippet))
-            {
-                return cachedWindowSnippet;
-            }
-
-            var windowSnippet = SnippetHelper.ExtractLineWindow(sourceCode, windowStart, windowEnd);
-            _snippetCache?.Set(windowCacheKey, windowSnippet);
-
-            return windowSnippet;
         }
 
         var windowStartLine = region?.StartLine ?? 1;
@@ -720,6 +758,20 @@ internal sealed class TriageWorkflowService
         if (_snippetCache != null && _snippetCache.TryGet(cacheKey, out var cachedSnippet))
         {
             return cachedSnippet;
+        }
+
+        var sourceCode = await GetSourceCodeAsync(sourcePath, sourceCodeCache).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(sourceCode))
+        {
+            return string.Empty;
+        }
+
+        if (evidenceMode is TriageEvidenceMode.LineWindowStrict or TriageEvidenceMode.LineWindowConcatenated)
+        {
+            var windowSnippet = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
+            _snippetCache?.Set(cacheKey, windowSnippet);
+
+            return windowSnippet;
         }
 
         var startLine = Math.Max(0, windowStartLine - 1);
@@ -736,17 +788,50 @@ internal sealed class TriageWorkflowService
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var extractedMethod = await _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine);
-        if (!string.IsNullOrWhiteSpace(extractedMethod) && !extractedMethod.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TreeSitterExtractionTimeout);
+
+        try
         {
-            finalSnippet = extractedMethod.Trim();
-            _snippetCache?.Set(cacheKey, finalSnippet);
-            return finalSnippet;
+            var extractedMethod = await _treeSitterEngine.ExtractMethodAsync(sourceCode, language, startLine, endLine, cts.Token).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(extractedMethod) && !extractedMethod.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
+            {
+                finalSnippet = extractedMethod.Trim();
+                _snippetCache?.Set(cacheKey, finalSnippet);
+                return finalSnippet;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); // Only rethrow if the parent cancelled
+            // Otherwise, it was just the timeout
+        }
+        catch (Exception)
+        {
+            // Ignore other extraction errors and fallback to line window
         }
 
         finalSnippet = SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
         _snippetCache?.Set(cacheKey, finalSnippet);
         return finalSnippet;
+    }
+
+    private async Task<string> GetSourceCodeAsync(string sourcePath, IDictionary<string, string>? sourceCodeCache)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+
+        if (sourceCodeCache != null && sourceCodeCache.TryGetValue(sourcePath, out var cachedSourceCode))
+        {
+            return cachedSourceCode;
+        }
+
+        var sourceCode = await _fileReader.ReadFileAsync(sourcePath).ConfigureAwait(false);
+        if (sourceCodeCache != null && !string.IsNullOrWhiteSpace(sourceCode))
+        {
+            sourceCodeCache[sourcePath] = sourceCode;
+        }
+
+        return sourceCode;
     }
 
     internal static string BuildSnippetCacheKey(string sourcePath, int startLine, int endLine, string mode)

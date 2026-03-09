@@ -1,6 +1,5 @@
 using ModelContextProtocol.Server;
 using System.ComponentModel;
-using System.Linq;
 
 namespace Sarifintown.AgentEngine;
 
@@ -10,48 +9,39 @@ public static class SarifPrompts
     /// <summary>
     /// Builds a slash-command prompt for consolidated triage read operations.
     /// </summary>
-    [McpServerPrompt(Name = "sarif_triage_query", Title = "Query Triage Posture")]
-    [Description("MUST: Use this kickoff slash command to retrieve posture summary and prioritized findings in one response.")]
+    [McpServerPrompt(Name = "sarif_get", Title = "Get Triage Posture")]
+    [Description("Retrieve posture summary and prioritized findings. Use includeEvidence=true to also get assembled triage guidance per finding.")]
     public static string TriageQueryPrompt(
         [Description("Scope action (keep, set, refine, clear).")]
         string scope = "keep",
         [Description("Optional scope filter expression (for example: severity:high, rule:SQLI).")]
         string filter = "",
-        [Description("Optional severity filter.")]
-        string severity = "",
-        [Description("Optional rule filter.")]
-        string rule = "",
-        [Description("Optional file path filter.")]
-        string file = "",
-        [Description("Optional triage state filter.")]
-        string state = "",
         [Description("Maximum finding count to return.")]
         int limit = 10,
-        [Description("When true, include evidence for returned findings.")]
+        [Description("Optional 1-based page number. When provided, it overrides automatic pagination and pageToken.")]
+        int page = 0,
+        [Description("When true, include evidence and triage prompt per finding.")]
         bool includeEvidence = false,
-        [Description("Optional finding identifier for deep-dive mode.")]
-        string findingId = "",
-        [Description("Optional evidence mode override (line-window-strict, line-window-concatenated, tree-sitter-method).")]
-        string evidenceMode = "")
+        [Description("When true, append assembled prompt text for debugging.")]
+        bool debugPrompt = false,
+        [Description("Optional pagination token returned by a previous sarif_get response.")]
+        string pageToken = "")
     {
-        var effectiveFilter = string.IsNullOrWhiteSpace(filter)
-            ? string.Join(", ", new[]
-            {
-                string.IsNullOrWhiteSpace(severity) ? string.Empty : $"severity:{severity}",
-                string.IsNullOrWhiteSpace(rule) ? string.Empty : $"rule:{rule}",
-                string.IsNullOrWhiteSpace(file) ? string.Empty : $"file:{file}",
-                string.IsNullOrWhiteSpace(state) ? string.Empty : $"state:{state}"
-            }.Where(item => !string.IsNullOrWhiteSpace(item)))
-            : filter;
+        var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
 
-        return $"Call `sarif_get` with scope='{scope}', filter='{effectiveFilter}', includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={limit}.";
+        return $"""
+            EXECUTION PROTOCOL — follow these steps exactly:
+            1. Call `sarif_get` with scope='{scope}', filter='{filter}', includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, page={page}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}, pageToken='{pageToken}'.
+            2. Output exactly one <vulnerability_report> block VERBATIM. Do NOT summarize, interpret, duplicate, or append extra text.
+            3. STOP immediately and wait for explicit user instruction.
+            """;
     }
 
     /// <summary>
     /// Builds a slash-command prompt for consolidated triage write operations.
     /// </summary>
-    [McpServerPrompt(Name = "sarif_triage_decide", Title = "Decide Triage State")]
-    [Description("MUST: Use this prompt to persist decisions for one or many findings via displayid aliases or scope.")]
+    [McpServerPrompt(Name = "sarif_triage", Title = "Triage Findings")]
+    [Description("Persist decisions for one or many findings via displayid aliases or scope.")]
     public static string TriageDecidePrompt(
         [Description("Decision state (confirmed, false_positive, test_code, wont_fix, mitigated).")]
         string state,
@@ -60,6 +50,11 @@ public static class SarifPrompts
         [Description("Target displayid, CSV displayid list, or scope.")]
         string target = "scope")
     {
-        return $"Call `sarif_triage` with state='{state}', reason='{reason}', target='{target}'.";
+        return $"""
+            EXECUTION PROTOCOL — follow these steps exactly:
+            1. Call `sarif_triage` with state='{state}', reason='{reason}', target='{target}'.
+            2. Output the result block VERBATIM. Do NOT add commentary.
+            3. Call `sarif_get` with scope='keep' to verify remaining findings.
+            """;
     }
 }

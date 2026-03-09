@@ -8,6 +8,7 @@
 
 ## MCP Enforcement Baseline
 - For SARIF/SAST/Secret triaging and reviewing workflows, use only `Sarifintown.Engine` MCP tools. Do not substitute with generic shell/terminal commands.
+- Whenever reviewing a security finding, immediately call the `sarif_triage_query` slash command. Do not analyze the finding with baseline knowledge before consuming triage prompt output.
 - Do not guess repository state, scan results, triage state, or code-flow evidence. Retrieve data through MCP tools first.
 - If a required domain action has an MCP tool, call the tool before proposing conclusions.
 - Keep responses aligned with tool outputs; do not invent findings, IDs, or file paths.

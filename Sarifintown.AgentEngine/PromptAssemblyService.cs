@@ -7,6 +7,7 @@ namespace Sarifintown.AgentEngine;
 public sealed class PromptAssemblyService : IPromptAssemblyService
 {
     private const string PromptsRootRelativePath = ".sarif/sarifintown-prompts";
+    private const string BundledPromptsDirectoryName = "sarifintown-prompts";
     private const string BaseDirectoryName = "base";
     private const string CategoriesDirectoryName = "categories";
     private const string OverridesDirectoryName = "org-overrides";
@@ -254,14 +255,33 @@ Only alter `### [Data Flow Evidence]` according to the selected extraction strat
     private static string ResolveRootDirectory(string? configuredRootDirectoryPath)
     {
         var workspaceRoot = WorkspaceSarifDiscovery.Discover().WorkspaceRoot;
+        var bundledPromptsDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, BundledPromptsDirectoryName));
+
         if (string.IsNullOrWhiteSpace(configuredRootDirectoryPath))
         {
-            return Path.GetFullPath(Path.Combine(workspaceRoot, PromptsRootRelativePath));
+            var workspacePromptDirectory = Path.GetFullPath(Path.Combine(workspaceRoot, PromptsRootRelativePath));
+            if (Directory.Exists(workspacePromptDirectory))
+            {
+                return workspacePromptDirectory;
+            }
+
+            return Directory.Exists(bundledPromptsDirectory)
+                ? bundledPromptsDirectory
+                : workspacePromptDirectory;
         }
 
-        return Path.IsPathRooted(configuredRootDirectoryPath)
+        var configuredPromptDirectory = Path.IsPathRooted(configuredRootDirectoryPath)
             ? Path.GetFullPath(configuredRootDirectoryPath)
             : Path.GetFullPath(Path.Combine(workspaceRoot, configuredRootDirectoryPath));
+
+        if (Directory.Exists(configuredPromptDirectory))
+        {
+            return configuredPromptDirectory;
+        }
+
+        return Directory.Exists(bundledPromptsDirectory)
+            ? bundledPromptsDirectory
+            : configuredPromptDirectory;
     }
 
     private string CreateMissingFileComment(string path)

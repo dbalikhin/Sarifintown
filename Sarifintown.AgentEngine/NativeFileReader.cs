@@ -13,7 +13,9 @@ namespace Sarifintown.AgentEngine
         public async Task<string> ReadFileAsync(string relativePath)
         {
             var fullPath = Path.Combine(_baseDirectory, relativePath);
-            return await File.ReadAllTextAsync(fullPath);
+            using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            return await reader.ReadToEndAsync();
         }
 
     }
