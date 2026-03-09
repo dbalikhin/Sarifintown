@@ -18,18 +18,22 @@ public static class SarifPrompts
         string filter = "",
         [Description("Maximum finding count to return.")]
         int limit = 10,
+        [Description("Optional 1-based page number. When provided, it overrides automatic pagination and pageToken.")]
+        int page = 0,
         [Description("When true, include evidence and triage prompt per finding.")]
         bool includeEvidence = false,
         [Description("When true, append assembled prompt text for debugging.")]
-        bool debugPrompt = false)
+        bool debugPrompt = false,
+        [Description("Optional pagination token returned by a previous sarif_get response.")]
+        string pageToken = "")
     {
         var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
 
         return $"""
             EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` with scope='{scope}', filter='{filter}', includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}.
-            2. Output the <vulnerability_report> block VERBATIM. Do NOT summarize or interpret.
-            3. STOP and wait for the user to select findings for triage.
+            1. Call `sarif_get` with scope='{scope}', filter='{filter}', includeEvidence={includeEvidence.ToString().ToLowerInvariant()}, limit={safeLimit}, page={page}, debugPrompt={debugPrompt.ToString().ToLowerInvariant()}, pageToken='{pageToken}'.
+            2. Output exactly one <vulnerability_report> block VERBATIM. Do NOT summarize, interpret, duplicate, or append extra text.
+            3. STOP immediately and wait for explicit user instruction.
             """;
     }
 

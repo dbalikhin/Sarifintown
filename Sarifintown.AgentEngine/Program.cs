@@ -57,7 +57,7 @@ builder.Services.Configure<SarifPreloadOptions>(
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
-builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService(discovery.WorkspaceRoot));
+builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService());
 builder.Services.AddSingleton<SnippetCacheService>();
 builder.Services.AddSingleton<SarifStateService>(serviceProvider =>
     new SarifStateService(

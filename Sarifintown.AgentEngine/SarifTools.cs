@@ -29,6 +29,8 @@ namespace Sarifintown.AgentEngine
         private static string _localUiBaseUrl = string.Empty;
         private static string _workspaceRoot = Directory.GetCurrentDirectory();
         private static ActiveScopeFilter _activeScope = new();
+        private static string _paginationScopeKey = string.Empty;
+        private static int _paginationNextOffset;
         private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
         private static int _nextDisplayId = 1;
@@ -123,14 +125,14 @@ namespace Sarifintown.AgentEngine
             {
                 _workspaceRoot = Path.GetFullPath(workspaceRoot);
                 _activeScope = new ActiveScopeFilter();
-                DisplayIdToFindingId.Clear();
-                FindingIdToDisplayId.Clear();
-                _nextDisplayId = 1;
+                _paginationScopeKey = string.Empty;
+                _paginationNextOffset = 0;
+                ResetDisplayIdMappings();
             }
         }
 
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings with triage guidance. Returns a summary table of findings with displayid aliases. CRITICAL EXECUTION PROTOCOL: (1) Output the vulnerability_report block VERBATIM. (2) Do NOT summarize, interpret, or skip findings. (3) STOP and wait for the user to select findings for triage via sarif_triage.")]
+        [Description("Retrieve scoped SARIF findings. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page/filter/scope change.")]
         public static async Task<CallToolResult> SarifGet(
             [Description("Scope action: keep (reuse active scope), set (replace scope), refine (narrow scope), or clear (remove all filters).")] 
             string scope = "keep",
@@ -140,11 +142,15 @@ namespace Sarifintown.AgentEngine
             bool includeEvidence = false,
             [Description("Maximum findings to return (1-25).")]
             int limit = 10,
+            [Description("Optional 1-based page number. When provided, this overrides automatic pagination and pageToken.")]
+            int page = 0,
             [Description("When true, append the fully assembled triage prompt text to the output for debugging.")]
-            bool debugPrompt = false)
+            bool debugPrompt = false,
+            [Description("Optional pagination token returned by a previous sarif_get call. Use context.pagination.next_page_token to fetch the next batch.")]
+            string pageToken = "")
         {
             var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
-            var payload = await ExecuteScopedGetAsync(scope, filter, includeEvidence, safeLimit, debugPrompt);
+            var payload = await ExecuteScopedGetAsync(scope, filter, includeEvidence, safeLimit, page, debugPrompt, pageToken);
             var stateContext = new
             {
                 context = new
@@ -155,6 +161,18 @@ namespace Sarifintown.AgentEngine
                         total_in_scope = payload.Context.Metrics.TotalInScope,
                         returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
                         remaining_in_scope = payload.Context.Metrics.RemainingInScope
+                    },
+                    pagination = new
+                    {
+                        page_token = payload.Context.Pagination.PageToken,
+                        page_size = payload.Context.Pagination.PageSize,
+                        page_number = payload.Context.Pagination.PageNumber,
+                        total_pages = payload.Context.Pagination.TotalPages,
+                        has_more = payload.Context.Pagination.HasMore,
+                        next_page_token = payload.Context.Pagination.NextPageToken,
+                        previous_page_token = payload.Context.Pagination.PreviousPageToken,
+                        next_page_number = payload.Context.Pagination.NextPageNumber,
+                        previous_page_number = payload.Context.Pagination.PreviousPageNumber
                     },
                     aliases = payload.Findings
                         .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
@@ -259,12 +277,20 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        private static async Task<ScopedGetPayload> ExecuteScopedGetAsync(string scope, string filter, bool includeEvidence, int limit, bool debugPrompt = false)
+        private static async Task<ScopedGetPayload> ExecuteScopedGetAsync(string scope, string filter, bool includeEvidence, int limit, int page = 0, bool debugPrompt = false, string pageToken = "")
         {
             var scopeAction = ParseScopeAction(scope);
             var parsedFilter = string.IsNullOrWhiteSpace(filter)
                 ? new ActiveScopeFilter()
                 : ParseScopeFilter(filter);
+            if (page < 0)
+            {
+                throw new ArgumentException("page must be greater than or equal to 0.", nameof(page));
+            }
+
+            var parsedPageTokenOffset = ParsePageTokenOffset(pageToken);
+            var hasExplicitPageToken = !string.IsNullOrWhiteSpace(pageToken);
+            var hasExplicitPage = page > 0;
 
             if (scopeAction == ScopeAction.Refine && parsedFilter.IsEmpty)
             {
@@ -278,7 +304,6 @@ namespace Sarifintown.AgentEngine
                 case ScopeAction.Set:
                     activeScope = parsedFilter;
                     SetActiveScope(activeScope);
-                    ResetDisplayIdMappings();
                     break;
                 case ScopeAction.Refine:
                     activeScope = MergeScope(activeScope, parsedFilter);
@@ -287,19 +312,73 @@ namespace Sarifintown.AgentEngine
                 case ScopeAction.Clear:
                     activeScope = new ActiveScopeFilter();
                     SetActiveScope(activeScope);
-                    ResetDisplayIdMappings();
                     break;
             }
 
             var executionScope = scopeAction == ScopeAction.Keep && !parsedFilter.IsEmpty
                 ? MergeScope(activeScope, parsedFilter)
                 : activeScope;
+            var paginationScopeKey = BuildPaginationScopeKey(executionScope);
+            var batchLimit = limit <= 0 ? 10 : limit;
+            var resetToFirstPage = scopeAction != ScopeAction.Keep;
+
+            var cursorOffset = parsedPageTokenOffset;
+            if (hasExplicitPage)
+            {
+                cursorOffset = (page - 1) * batchLimit;
+            }
+            else if (!hasExplicitPageToken)
+            {
+                lock (SyncRoot)
+                {
+                    if (resetToFirstPage)
+                    {
+                        _paginationScopeKey = paginationScopeKey;
+                        _paginationNextOffset = 0;
+                        cursorOffset = 0;
+                    }
+                    else if (string.Equals(_paginationScopeKey, paginationScopeKey, StringComparison.Ordinal))
+                    {
+                        cursorOffset = _paginationNextOffset;
+                    }
+                    else
+                    {
+                        _paginationScopeKey = paginationScopeKey;
+                        _paginationNextOffset = 0;
+                        cursorOffset = 0;
+                    }
+                }
+            }
 
             var workflow = CreateTriageWorkflowService();
-            var batchLimit = limit <= 0 ? 10 : limit;
 
             var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
-            var executionFindings = await workflow.ListAsync(executionScope.ToQueryOptions(batchLimit));
+            var executionScopeFindings = executionScope == activeScope
+                ? activeScopeFindings
+                : await workflow.ListAsync(executionScope.ToQueryOptions(int.MaxValue));
+
+            var effectiveOffset = Math.Min(cursorOffset, executionScopeFindings.Count);
+            var executionFindings = executionScopeFindings
+                .Skip(effectiveOffset)
+                .Take(batchLimit)
+                .ToList();
+            var nextOffset = effectiveOffset + executionFindings.Count;
+            var hasMore = nextOffset < executionScopeFindings.Count;
+            var totalPages = executionScopeFindings.Count <= 0
+                ? 1
+                : (int)Math.Ceiling((double)executionScopeFindings.Count / batchLimit);
+            var currentPage = (int)Math.Floor((double)effectiveOffset / batchLimit) + 1;
+            var previousPageToken = currentPage > 1
+                ? ((currentPage - 2) * batchLimit).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : string.Empty;
+            var previousPageNumber = currentPage > 1 ? currentPage - 1 : (int?)null;
+            var nextPageNumber = hasMore ? currentPage + 1 : (int?)null;
+
+            lock (SyncRoot)
+            {
+                _paginationScopeKey = paginationScopeKey;
+                _paginationNextOffset = hasMore ? nextOffset : effectiveOffset;
+            }
 
             IReadOnlyDictionary<string, TriageInspectResult>? evidenceByFindingId = null;
             if (includeEvidence && executionFindings.Count > 0)
@@ -324,7 +403,7 @@ namespace Sarifintown.AgentEngine
                 }
 
                 string? triagePrompt = null;
-                if (includeEvidence && promptAssembly != null)
+                if (debugPrompt && promptAssembly != null)
                 {
                     triagePrompt = await promptAssembly.BuildTriagePromptAsync(
                         evidence?.RuleId ?? finding.RuleName,
@@ -348,11 +427,25 @@ namespace Sarifintown.AgentEngine
                 findingRows.Count,
                 activeScopeFindings.Count(item => string.Equals(item.State, TriageFindingState.Open.ToString(), StringComparison.OrdinalIgnoreCase)));
 
+            var pagination = new ScopedPagination(
+                effectiveOffset.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                batchLimit,
+                hasMore
+                    ? nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    : string.Empty,
+                hasMore,
+                currentPage,
+                totalPages,
+                previousPageToken,
+                nextPageNumber,
+                previousPageNumber);
+
             return new ScopedGetPayload(
                 new ScopedContext(
                     "Results are filtered by the persistent Active Scope.",
                     ToScopeDictionary(activeScope),
-                    new ScopedMetrics(metrics.TotalInScope, metrics.ReturnedInBatch, metrics.RemainingInScope)),
+                    new ScopedMetrics(metrics.TotalInScope, metrics.ReturnedInBatch, metrics.RemainingInScope),
+                    pagination),
                 findingRows,
                 debugPrompt);
         }
@@ -424,6 +517,33 @@ namespace Sarifintown.AgentEngine
                 }
             }
 
+            var evidenceRows = new List<ScopedTriageEvidence>(modifiedIds.Count);
+            if (modifiedIds.Count > 0)
+            {
+                var inspectionTargets = modifiedIds
+                    .Take(MaxEvidenceInspectCount)
+                    .ToList();
+
+                var evidenceByFindingId = await workflow.InspectManyAsync(inspectionTargets);
+                foreach (var findingId in inspectionTargets)
+                {
+                    evidenceByFindingId.TryGetValue(findingId, out var evidence);
+
+                    string displayId;
+                    lock (SyncRoot)
+                    {
+                        displayId = FindingIdToDisplayId.TryGetValue(findingId, out var did)
+                            ? did
+                            : findingId;
+                    }
+
+                    evidenceRows.Add(new ScopedTriageEvidence(
+                        findingId,
+                        displayId,
+                        evidence));
+                }
+            }
+
             return new ScopedTriagePayload(
                 modifiedIds.Count == targetIds.Count,
                 requestedState,
@@ -431,7 +551,8 @@ namespace Sarifintown.AgentEngine
                 target,
                 modifiedIds.Count,
                 modifiedIds,
-                workflowState);
+                workflowState,
+                evidenceRows);
         }
 
         private static (string RequestedState, string WorkflowState) NormalizeDecisionState(string state)
@@ -621,11 +742,49 @@ namespace Sarifintown.AgentEngine
                         returned_in_batch = payload.Context.Metrics.ReturnedInBatch,
                         remaining_in_scope = payload.Context.Metrics.RemainingInScope
                     },
+                    pagination = new
+                    {
+                        page_token = payload.Context.Pagination.PageToken,
+                        page_size = payload.Context.Pagination.PageSize,
+                        page_number = payload.Context.Pagination.PageNumber,
+                        total_pages = payload.Context.Pagination.TotalPages,
+                        has_more = payload.Context.Pagination.HasMore,
+                        next_page_token = payload.Context.Pagination.NextPageToken,
+                        previous_page_token = payload.Context.Pagination.PreviousPageToken,
+                        next_page_number = payload.Context.Pagination.NextPageNumber,
+                        previous_page_number = payload.Context.Pagination.PreviousPageNumber
+                    },
                     aliases = payload.Findings
                         .Select(item => new { displayid = item.DisplayId, finding_id = item.FindingId })
                         .ToArray()
                 }
             }) as JsonObject ?? new JsonObject();
+        }
+
+        private static int ParsePageTokenOffset(string pageToken)
+        {
+            if (string.IsNullOrWhiteSpace(pageToken))
+            {
+                return 0;
+            }
+
+            if (!int.TryParse(pageToken.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var offset) || offset < 0)
+            {
+                throw new ArgumentException("pageToken must be a non-negative integer.", nameof(pageToken));
+            }
+
+            return offset;
+        }
+
+        private static string BuildPaginationScopeKey(ActiveScopeFilter scope)
+        {
+            ArgumentNullException.ThrowIfNull(scope);
+
+            return string.Join('|',
+                scope.Severity.Trim(),
+                scope.Rule.Trim(),
+                scope.File.Trim(),
+                scope.State.Trim()).ToLowerInvariant();
         }
 
         private static string GetWorkspaceRoot()
@@ -645,7 +804,12 @@ namespace Sarifintown.AgentEngine
             var reportMarkdown = markdown?.Trim() ?? string.Empty;
             var text = $$"""
             <system_directive>
-            CRITICAL: You must output the content inside the <vulnerability_report> tags VERBATIM. Do not summarize, alter, or explain it. Do not add conversational filler before or after.
+            CRITICAL OUTPUT CONTRACT:
+            1) Output the content inside the <vulnerability_report> tags VERBATIM.
+            2) Output exactly one <vulnerability_report> block (no duplicates).
+            3) Do not summarize, restate, interpret, or add any additional tables or prose.
+            4) Do not ask follow-up questions.
+            5) Stop immediately after the single report block.
             </system_directive>
 
             <vulnerability_report>
@@ -752,6 +916,9 @@ namespace Sarifintown.AgentEngine
             ArgumentNullException.ThrowIfNull(payload);
             var metrics = payload.Context.Metrics;
             var findings = payload.Findings;
+            var currentPage = payload.Context.Pagination.PageNumber;
+            var totalPages = payload.Context.Pagination.TotalPages;
+            var nextPage = payload.Context.Pagination.NextPageNumber ?? currentPage;
 
             var lines = new List<string>
             {
@@ -760,8 +927,23 @@ namespace Sarifintown.AgentEngine
                 $"- Total in scope: **{metrics.TotalInScope}**",
                 $"- Returned in batch: **{metrics.ReturnedInBatch}**",
                 $"- Remaining in scope: **{metrics.RemainingInScope}**",
+                $"- Page: **{currentPage} of {totalPages}**",
+                $"- Page size: **{payload.Context.Pagination.PageSize}**",
+                $"- Has more: **{payload.Context.Pagination.HasMore}**",
                 string.Empty
             };
+
+            if (payload.Context.Pagination.HasMore)
+            {
+                lines.Add($"- Next page: **{nextPage} of {totalPages}**");
+                lines.Add(string.Empty);
+            }
+
+            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
+            {
+                lines.Add($"- Previous page: **{payload.Context.Pagination.PreviousPageNumber.Value} of {totalPages}**");
+                lines.Add(string.Empty);
+            }
 
             if (findings.Count == 0)
             {
@@ -775,22 +957,21 @@ namespace Sarifintown.AgentEngine
                     lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
                 }
 
-                var findingsWithPrompts = findings.Where(f => !string.IsNullOrWhiteSpace(f.TriagePrompt)).ToList();
-                if (findingsWithPrompts.Count > 0)
-                {
-                    lines.Add(string.Empty);
-                    lines.Add("### Triage Guidance Per Finding");
-                    foreach (var finding in findingsWithPrompts)
-                    {
-                        lines.Add(string.Empty);
-                        lines.Add($"#### Finding `{EscapeMarkdown(finding.DisplayId)}` — `{EscapeMarkdown(finding.Rule)}`");
-                        lines.Add(finding.TriagePrompt!);
-                    }
-                }
             }
 
             lines.Add(string.Empty);
-            lines.Add("**Next action:** Use `sarif_triage` with `state`, `reason`, and `target` (displayid).");
+            lines.Add("**STOP:** Wait for explicit user instruction.");
+            lines.Add("If the user asks to triage, call `sarif_triage` with `state`, `reason`, and `target` (displayid).");
+            if (payload.Context.Pagination.HasMore)
+            {
+                lines.Add($"Optional fetch: if the user explicitly asks for more findings, call `sarif_get` once with `page: {nextPage}` or with `context.pagination.next_page_token`.");
+                lines.Add("Do not auto-fetch another batch; wait for the user instruction.");
+            }
+
+            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
+            {
+                lines.Add($"To go back, call `sarif_get` once with `page: {payload.Context.Pagination.PreviousPageNumber.Value}`.");
+            }
 
             if (payload.DebugPrompt)
             {
@@ -830,7 +1011,8 @@ namespace Sarifintown.AgentEngine
                 $"- State: `{EscapeMarkdown(payload.State)}`",
                 $"- Internal workflow state: `{EscapeMarkdown(payload.WorkflowState)}`",
                 $"- Target: `{EscapeMarkdown(payload.Target)}`",
-                $"- Affected findings: **{payload.AffectedCount}**"
+                $"- Affected findings: **{payload.AffectedCount}**",
+                $"- Original reasoning: {EscapeMarkdown(payload.Reason)}"
             };
 
             if (payload.ModifiedFindingIds.Count > 0)
@@ -848,6 +1030,54 @@ namespace Sarifintown.AgentEngine
                     }
 
                     lines.Add($"- {displayLabel} → `{EscapeMarkdown(payload.WorkflowState)}`");
+                }
+            }
+
+            if (payload.Evidence.Count > 0)
+            {
+                lines.Add(string.Empty);
+                lines.Add("### Decision Evidence");
+
+                foreach (var evidenceRow in payload.Evidence)
+                {
+                    lines.Add(string.Empty);
+                    lines.Add($"#### Finding `{EscapeMarkdown(evidenceRow.DisplayId)}`");
+
+                    if (evidenceRow.Evidence != null)
+                    {
+                        lines.Add($"- Rule: `{EscapeMarkdown(evidenceRow.Evidence.RuleId)}`");
+                        lines.Add($"- Severity: `{EscapeMarkdown(evidenceRow.Evidence.Severity)}`");
+                        lines.Add($"- Message: {EscapeMarkdown(evidenceRow.Evidence.Message)}");
+
+                        lines.Add(string.Empty);
+                        lines.Add("##### Data Flow Used");
+                        if (evidenceRow.Evidence.DataFlowEvidenceBlocks.Count > 0)
+                        {
+                            foreach (var block in evidenceRow.Evidence.DataFlowEvidenceBlocks)
+                            {
+                                lines.Add($"- Steps `{block.StartStepIndex}`-`{block.EndStepIndex}` at `{EscapeMarkdown(block.FilePath)}`:{block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}");
+                                lines.Add("```csharp");
+                                lines.Add(block.CodeSnippet);
+                                lines.Add("```");
+                            }
+                        }
+                        else if (evidenceRow.Evidence.DataFlowSteps.Count > 0)
+                        {
+                            foreach (var step in evidenceRow.Evidence.DataFlowSteps)
+                            {
+                                lines.Add($"- Step `{step.Index}` at `{EscapeMarkdown(step.FilePath)}`:{step.StartLine?.ToString() ?? "?"} — {EscapeMarkdown(step.Message)}");
+                            }
+                        }
+                        else
+                        {
+                            lines.Add("- No data flow blocks were available for this finding.");
+                        }
+                    }
+                    else
+                    {
+                        lines.Add("- Evidence unavailable for this finding.");
+                    }
+
                 }
             }
 
@@ -1174,10 +1404,22 @@ namespace Sarifintown.AgentEngine
 
         private sealed record ScopedMetrics(int TotalInScope, int ReturnedInBatch, int RemainingInScope);
 
+        private sealed record ScopedPagination(
+            string PageToken,
+            int PageSize,
+            string NextPageToken,
+            bool HasMore,
+            int PageNumber,
+            int TotalPages,
+            string PreviousPageToken,
+            int? NextPageNumber,
+            int? PreviousPageNumber);
+
         private sealed record ScopedContext(
             string Notice,
             IReadOnlyDictionary<string, string> ActiveScope,
-            ScopedMetrics Metrics);
+            ScopedMetrics Metrics,
+            ScopedPagination Pagination);
 
         private sealed record ScopedLocation(string File, int? Line);
 
@@ -1201,7 +1443,13 @@ namespace Sarifintown.AgentEngine
             string Target,
             int AffectedCount,
             IReadOnlyList<string> ModifiedFindingIds,
-            string WorkflowState);
+            string WorkflowState,
+            IReadOnlyList<ScopedTriageEvidence> Evidence);
+
+        private sealed record ScopedTriageEvidence(
+            string FindingId,
+            string DisplayId,
+            TriageInspectResult? Evidence);
 
         [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
         public static string GenerateAnalysisReport(

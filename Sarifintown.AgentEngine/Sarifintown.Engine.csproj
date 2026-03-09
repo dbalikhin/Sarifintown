@@ -25,6 +25,7 @@
 
 <ItemGroup>
 	<Content Include="..\Sarifintown\wwwroot\js\tree-sitter\**\*.*" Link="tree-sitter\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+	<Content Include="..\.sarif\sarifintown-prompts\**\*.md" Link="sarifintown-prompts\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 </Project>
