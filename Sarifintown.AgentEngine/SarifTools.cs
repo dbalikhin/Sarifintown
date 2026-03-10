@@ -363,7 +363,7 @@ namespace Sarifintown.AgentEngine
             };
 
             return CreateDualPurposeResult(
-                markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count),
+                markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count, await BuildReviewDebugPromptsAsync(triagePayload)),
                 systemStateContext: reviewStateContext,
                 resourceUri: BuildUiResourceUri("triage", "sarif_review", string.Empty),
                 additionalMeta: reviewMeta);
@@ -853,13 +853,8 @@ namespace Sarifintown.AgentEngine
                     evidenceByFindingId.TryGetValue(finding.FindingId, out evidence);
                 }
 
+                // We skip generating per-finding triage prompt to avoid massive duplication
                 string? triagePrompt = null;
-                if (debugPrompt && promptAssembly != null)
-                {
-                    triagePrompt = await promptAssembly.BuildTriagePromptAsync(
-                        evidence?.RuleId ?? finding.RuleName,
-                        evidence?.Message ?? finding.RuleName).ConfigureAwait(false);
-                }
 
                 findingRows.Add(new ScopedFinding(
                     displayId,
@@ -871,6 +866,18 @@ namespace Sarifintown.AgentEngine
                     new ScopedLocation(finding.FilePath, finding.LineNumber),
                     evidence,
                     triagePrompt));
+            }
+
+            string? batchedTriagePrompt = null;
+            if (promptAssembly != null && executionFindings.Count > 0)
+            {
+                var inputFindings = findingRows.Select(f => (f.Evidence?.RuleId ?? f.Rule, f.Evidence?.Message ?? f.Message!));
+                batchedTriagePrompt = await promptAssembly.BuildBatchTriagePromptAsync(inputFindings).ConfigureAwait(false);
+                // Attach the batched prompt to the first finding only, to transport it to the markdown builder
+                if (findingRows.Count > 0)
+                {
+                    findingRows[0] = findingRows[0] with { TriagePrompt = batchedTriagePrompt };
+                }
             }
 
             var metrics = new SarifGetMetrics(
@@ -1678,26 +1685,36 @@ namespace Sarifintown.AgentEngine
                 lines.Add($"To go back, call `sarif_get` once with `page: {payload.Context.Pagination.PreviousPageNumber.Value}`.");
             }
 
-            if (payload.DebugPrompt)
+            var consolidatedPrompt = findings.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.TriagePrompt))?.TriagePrompt;
+            if (!string.IsNullOrWhiteSpace(consolidatedPrompt))
             {
-                var debugFindings = findings.Where(f => !string.IsNullOrWhiteSpace(f.TriagePrompt)).ToList();
-                if (debugFindings.Count > 0)
+                lines.Add(string.Empty);
+                lines.Add("---");
+
+                if (payload.DebugPrompt)
                 {
+                    lines.Add("### DEBUG: Assembled Triage Prompt");
                     lines.Add(string.Empty);
-                    lines.Add("---");
-                    lines.Add("### DEBUG: Assembled Triage Prompts");
+                    lines.Add("<details><summary>Batched Triage System Prompt</summary>");
                     lines.Add(string.Empty);
-                    foreach (var finding in debugFindings)
-                    {
-                        lines.Add($"<details><summary>Prompt for finding {EscapeMarkdown(finding.DisplayId)} ({EscapeMarkdown(finding.Rule)})</summary>");
-                        lines.Add(string.Empty);
-                        lines.Add("```");
-                        lines.Add(finding.TriagePrompt!);
-                        lines.Add("```");
-                        lines.Add(string.Empty);
-                        lines.Add("</details>");
-                        lines.Add(string.Empty);
-                    }
+                    lines.Add("```markdown");
+                    lines.Add(consolidatedPrompt);
+                    lines.Add("```");
+                    lines.Add(string.Empty);
+                    lines.Add("</details>");
+                    lines.Add(string.Empty);
+                }
+                else
+                {
+                    lines.Add("### Triage Analysis Instructions");
+                    lines.Add("Follow these instructions when analyzing the findings above for review.");
+                    lines.Add(string.Empty);
+                    lines.Add("<details><summary>View Execution Directives</summary>");
+                    lines.Add(string.Empty);
+                    lines.Add(consolidatedPrompt);
+                    lines.Add(string.Empty);
+                    lines.Add("</details>");
+                    lines.Add(string.Empty);
                 }
             }
 
@@ -1792,7 +1809,46 @@ namespace Sarifintown.AgentEngine
             return string.Join(Environment.NewLine, lines);
         }
 
-        private static string BuildScopedReviewMarkdown(ScopedTriagePayload payload, int ledgerEntriesWritten)
+        /// <summary>
+        /// Builds debug prompt entries for reviewed findings when debug prompt mode is enabled.
+        /// </summary>
+        private static async Task<string?> BuildReviewDebugPromptsAsync(
+            ScopedTriagePayload triagePayload)
+        {
+            bool debugEnabled;
+            lock (SyncRoot)
+            {
+                debugEnabled = _debugPromptEnabled;
+            }
+
+            if (!debugEnabled)
+            {
+                return null;
+            }
+
+            var promptAssembly = PromptAssembly;
+            if (promptAssembly == null)
+            {
+                return null;
+            }
+
+            var inputs = triagePayload.Evidence
+                .Where(e => !string.IsNullOrWhiteSpace(e.Evidence?.RuleId) || !string.IsNullOrWhiteSpace(e.Evidence?.Message))
+                .Select(e => (e.Evidence!.RuleId, e.Evidence!.Message))
+                .ToList();
+
+            if (inputs.Count == 0)
+            {
+                return null;
+            }
+
+            return await promptAssembly.BuildBatchTriagePromptAsync(inputs).ConfigureAwait(false);
+        }
+
+        private static string BuildScopedReviewMarkdown(
+            ScopedTriagePayload payload,
+            int ledgerEntriesWritten,
+            string? debugPrompt = null)
         {
             ArgumentNullException.ThrowIfNull(payload);
 
@@ -1875,6 +1931,22 @@ namespace Sarifintown.AgentEngine
                         lines.Add("- Evidence unavailable for this finding.");
                     }
                 }
+            }
+
+            if (!string.IsNullOrWhiteSpace(debugPrompt))
+            {
+                lines.Add(string.Empty);
+                lines.Add("---");
+                lines.Add("### DEBUG: Assembled Triage Prompt");
+                lines.Add(string.Empty);
+                lines.Add("<details><summary>Batched Triage System Prompt</summary>");
+                lines.Add(string.Empty);
+                lines.Add("```markdown");
+                lines.Add(debugPrompt);
+                lines.Add("```");
+                lines.Add(string.Empty);
+                lines.Add("</details>");
+                lines.Add(string.Empty);
             }
 
             lines.Add(string.Empty);
@@ -1972,7 +2044,7 @@ namespace Sarifintown.AgentEngine
 
             stateService ??= new SarifStateService(
                 FileReader,
-                Options.Create(new SarifPreloadOptions
+                Options.Create(new SarifOptions
                 {
                     Strategy = PreloadStrategy.LatestPerTool,
                     EnableSnippetPreload = false

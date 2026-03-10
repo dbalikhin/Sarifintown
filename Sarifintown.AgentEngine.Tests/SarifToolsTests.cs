@@ -585,10 +585,13 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public void SarifUpdate_WithInvalidState_ThrowsArgumentException()
+        public async Task SarifUpdate_WithInvalidState_ReturnsValidationError()
         {
-            Assert.ThrowsAsync<ArgumentException>(async () =>
-                await SarifTools.SarifUpdate(state: "tp", reason: "invalid", target: "scope"));
+            var result = await SarifTools.SarifUpdate(state: "tp", reason: "invalid", target: "scope");
+            var text = (result.Content[0] as TextContentBlock)?.Text;
+
+            Assert.That(text, Is.Not.Null);
+            Assert.That(text, Does.Contain("`state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated."));
         }
 
         [Test]
@@ -764,6 +767,14 @@ namespace Sarifintown.AgentEngine.Tests
             var sarifDirectory = Path.Combine(workspace, ".sarif");
             Directory.CreateDirectory(sarifDirectory);
 
+            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
+            Directory.CreateDirectory(promptsDir);
+            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Test Core Directive");
+            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Test Output Format");
+            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
+            Directory.CreateDirectory(categoriesDir);
+            File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Test Default SAST");
+
             var sarifPath = Path.Combine(sarifDirectory, "no-debug.sarif");
             File.WriteAllText(sarifPath, """
             {
@@ -783,6 +794,8 @@ namespace Sarifintown.AgentEngine.Tests
 
             SarifTools.SetWorkspaceRoot(workspace);
             SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
+                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
 
             try
             {
@@ -791,6 +804,123 @@ namespace Sarifintown.AgentEngine.Tests
                 SarifTools.SetIncludeEvidenceByDefault(false);
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
+
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Contains.Substring("Triage Analysis Instructions"));
+                Assert.That(text, Contains.Substring("# Test Core Directive"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifReview_WithDebugPromptTrue_IncludesDebugSection()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
+            Directory.CreateDirectory(promptsDir);
+            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Review Core Directive");
+            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Review Output Format");
+            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
+            Directory.CreateDirectory(categoriesDir);
+            File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Review Default SAST");
+
+            var sarifPath = Path.Combine(sarifDirectory, "review-debug.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-REVIEW-DEBUG",
+                      "level": "error",
+                      "message": { "text": "review debug finding" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
+                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
+
+            try
+            {
+                SarifTools.SetDebugPromptEnabled(true);
+                SarifTools.SetIncludeEvidenceByDefault(true);
+
+                var getResult = await SarifTools.SarifGet(limit: 10);
+                var meta = JsonSerializer.SerializeToElement(getResult.Meta);
+                var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                var reviewResult = await SarifTools.SarifReview(
+                    target: displayId!,
+                    state: "false_positive",
+                    reason: "Test code pattern",
+                    llmReasoning: "Analyzed the code flow",
+                    inputMarkdown: "evidence markdown");
+                var text = ((TextContentBlock)reviewResult.Content[0]).Text;
+
+                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Contains.Substring("# Review Core Directive"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifReview_WithDebugPromptFalse_OmitsDebugSection()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "review-nodebug.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "results": [
+                    {
+                      "ruleId": "RULE-REVIEW-NODEBUG",
+                      "level": "error",
+                      "message": { "text": "review no debug" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                SarifTools.SetDebugPromptEnabled(false);
+                SarifTools.SetIncludeEvidenceByDefault(true);
+
+                var getResult = await SarifTools.SarifGet(limit: 10);
+                var meta = JsonSerializer.SerializeToElement(getResult.Meta);
+                var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
+
+                var reviewResult = await SarifTools.SarifReview(
+                    target: displayId!,
+                    state: "confirmed",
+                    reason: "Real vulnerability",
+                    llmReasoning: "Code is reachable",
+                    inputMarkdown: "evidence markdown");
+                var text = ((TextContentBlock)reviewResult.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
             }
@@ -946,7 +1076,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithIncludeEvidence_OmitsTriageGuidanceByDefault()
+        public async Task SarifGet_WithIncludeEvidence_IncludesTriageInstructionsByDefault()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -988,8 +1118,9 @@ namespace Sarifintown.AgentEngine.Tests
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
-                Assert.That(text, Does.Not.Contain("### Triage Guidance Per Finding"));
-                Assert.That(text, Does.Not.Contain("# Core Directive"));
+                Assert.That(text, Contains.Substring("### Triage Analysis Instructions"));
+                Assert.That(text, Contains.Substring("# Core Directive"));
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
             }
             finally
             {

@@ -49,13 +49,10 @@ WriteStartupInfo($"Workspace root: '{discovery.WorkspaceRoot}'");
 WriteStartupInfo($"Discovered SARIF files: {discovery.SarifFiles.Count}");
 
 builder.Configuration
-    .AddJsonFile(Path.Combine(discovery.WorkspaceRoot, ".sarif", "engine.json"), optional: true)
     .AddEnvironmentVariables(prefix: "SARIFINTOWN_");
 
-builder.Services.Configure<SarifPreloadOptions>(
-    builder.Configuration.GetSection(SarifPreloadOptions.SectionName));
-builder.Services.Configure<SarifServerOptions>(
-    builder.Configuration.GetSection(SarifServerOptions.SectionName));
+builder.Services.Configure<SarifOptions>(
+    builder.Configuration.GetSection(SarifOptions.SectionName));
 
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
@@ -65,7 +62,7 @@ builder.Services.AddSingleton<SnippetCacheService>();
 builder.Services.AddSingleton<SarifStateService>(serviceProvider =>
     new SarifStateService(
         serviceProvider.GetRequiredService<IFileReader>(),
-        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<SarifPreloadOptions>>(),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<SarifOptions>>(),
         discovery.WorkspaceRoot,
         discovery.SarifFiles));
 builder.Services.AddSingleton<SnippetWarmupService>(serviceProvider =>
@@ -102,8 +99,7 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
-var preloadOptions = app.Services.GetRequiredService<IOptions<SarifPreloadOptions>>().Value;
-var serverOptions = app.Services.GetRequiredService<IOptions<SarifServerOptions>>().Value;
+var sarifOptions = app.Services.GetRequiredService<IOptions<SarifOptions>>().Value;
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -115,14 +111,14 @@ SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyServi
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
-SarifTools.SetDebugPromptEnabled(serverOptions.EnableDebugPrompt);
-SarifTools.SetIncludeEvidenceByDefault(serverOptions.IncludeEvidenceByDefault);
+SarifTools.SetDebugPromptEnabled(sarifOptions.EnableDebugPrompt);
+SarifTools.SetIncludeEvidenceByDefault(sarifOptions.IncludeEvidenceByDefault);
 await RunStartupStageAsync("Available facets initialization", () => SarifTools.InitializeAvailableFacetsAsync());
 WriteStartupInfo("MCP tool dependencies configured.");
 
 await RunStartupStageAsync("Web host start", () => app.StartAsync());
 
-if (preloadOptions.EnableSnippetPreload)
+if (sarifOptions.EnableSnippetPreload)
 {
     await RunStartupStageAsync(
         $"Snippet preload bootstrap ({InitialSnippetPreloadCount})",
