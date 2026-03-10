@@ -28,4 +28,8 @@
 	<Content Include="..\.sarif\sarifintown-prompts\**\*.md" Link="sarifintown-prompts\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
+<ItemGroup>
+
+</ItemGroup>
+
 </Project>

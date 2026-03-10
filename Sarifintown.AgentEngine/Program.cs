@@ -49,15 +49,20 @@ WriteStartupInfo($"Workspace root: '{discovery.WorkspaceRoot}'");
 WriteStartupInfo($"Discovered SARIF files: {discovery.SarifFiles.Count}");
 
 builder.Configuration
+    .AddJsonFile(Path.Combine(discovery.WorkspaceRoot, "mcp.json"), optional: true, reloadOnChange: true)
     .AddEnvironmentVariables(prefix: "SARIFINTOWN_");
 
 builder.Services.Configure<SarifOptions>(
     builder.Configuration.GetSection(SarifOptions.SectionName));
 
+builder.Services.Configure<PromptAssemblyOptions>(
+    builder.Configuration.GetSection(PromptAssemblyOptions.SectionName));
+
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
-builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService());
+builder.Services.AddSingleton<IPromptAssemblyService>(serviceProvider => 
+    new PromptAssemblyService(serviceProvider.GetRequiredService<IOptions<PromptAssemblyOptions>>()));
 builder.Services.AddSingleton<SnippetCacheService>();
 builder.Services.AddSingleton<SarifStateService>(serviceProvider =>
     new SarifStateService(

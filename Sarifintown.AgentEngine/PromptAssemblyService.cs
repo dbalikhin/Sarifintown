@@ -14,19 +14,25 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
 
     private const string CoreDirectiveFileName = "core-directive.md";
     private const string OutputFormatFileName = "output-format.md";
-    private const string SqlCategoryFileName = "sast-sqli.md";
-    private const string XssCategoryFileName = "sast-xss.md";
-    private const string SecretCategoryFileName = "secret-exposure.md";
-    private const string DefaultCategoryFileName = "default-sast.md";
+    private const string SastCategoryFileName = "sast.md";
+    private const string SastLegacyCategoryFileName = "sast"; // Not strictly needed, we can just use "sast.md"
+    private const string SecretCategoryFileName = "secret.md";
+    private const string ScaCategoryFileName = "sca.md";
 
     private readonly string _promptRootDirectory;
     private readonly PromptTemplateStyle _templateStyle;
+    private readonly bool _enableSastModule;
+    private readonly bool _enableSecretModule;
+    private readonly bool _enableScaModule;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _fileCache = new(StringComparer.OrdinalIgnoreCase);
 
     public PromptAssemblyService(string? rootDirectoryPath = null)
     {
         _promptRootDirectory = ResolveRootDirectory(rootDirectoryPath);
         _templateStyle = PromptTemplateStyle.Structured;
+        _enableSastModule = true;
+        _enableSecretModule = true;
+        _enableScaModule = true;
     }
 
     public PromptAssemblyService(IOptions<PromptAssemblyOptions> options)
@@ -34,6 +40,9 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         ArgumentNullException.ThrowIfNull(options);
         _promptRootDirectory = ResolveRootDirectory(options.Value.RootDirectoryPath);
         _templateStyle = options.Value.TemplateStyle;
+        _enableSastModule = options.Value.EnableSastModule;
+        _enableSecretModule = options.Value.EnableSecretModule;
+        _enableScaModule = options.Value.EnableScaModule;
     }
 
     /// <summary>
@@ -47,18 +56,29 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         var resolvedMessage = message?.Trim() ?? string.Empty;
 
         var coreDirectivePath = Path.Combine(_promptRootDirectory, BaseDirectoryName, CoreDirectiveFileName);
-        var categoryModulePath = Path.Combine(
-            _promptRootDirectory,
-            CategoriesDirectoryName,
-            DetermineCategoryModule(resolvedRuleId, resolvedMessage));
         var outputFormatPath = Path.Combine(_promptRootDirectory, BaseDirectoryName, OutputFormatFileName);
 
         var sections = new List<string>
         {
-            await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false),
-            await ReadModuleOrMissingCommentAsync(categoryModulePath, cancellationToken).ConfigureAwait(false),
-            BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle)
+            await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false)
         };
+
+        if (_enableSastModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableSecretModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SecretCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableScaModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, ScaCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        sections.Add(BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle));
 
         var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(overrideSection))
@@ -83,24 +103,24 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         var coreDirectivePath = Path.Combine(_promptRootDirectory, BaseDirectoryName, CoreDirectiveFileName);
         sections.Add(await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false));
 
-        var categoryGroups = findings
-            .Select(f => new 
-            { 
-                RuleId = f.RuleId?.Trim() ?? string.Empty, 
-                Message = f.Message?.Trim() ?? string.Empty 
-            })
-            .GroupBy(f => DetermineCategoryModule(f.RuleId, f.Message))
-            .ToList();
-
-        foreach (var group in categoryGroups)
+        if (_enableSastModule)
         {
-            var categoryModulePath = Path.Combine(_promptRootDirectory, CategoriesDirectoryName, group.Key);
-            sections.Add(await ReadModuleOrMissingCommentAsync(categoryModulePath, cancellationToken).ConfigureAwait(false));
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
 
-            foreach (var finding in group.DistinctBy(f => $"{f.RuleId}:{f.Message}"))
-            {
-                sections.Add(BuildFindingContextSection(finding.RuleId, finding.Message, _templateStyle));
-            }
+        if (_enableSecretModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SecretCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableScaModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, ScaCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        foreach (var finding in findings.DistinctBy(f => $"{f.RuleId?.Trim() ?? string.Empty}:{f.Message?.Trim() ?? string.Empty}"))
+        {
+            sections.Add(BuildFindingContextSection(finding.RuleId, finding.Message, _templateStyle));
         }
 
         var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
@@ -231,30 +251,6 @@ Always keep `### [Metadata]` and `### [Description]` unchanged across extraction
 Only alter `### [Data Flow Evidence]` according to the selected extraction strategy.
 """;
 
-    private static string DetermineCategoryModule(string ruleId, string message)
-    {
-        var normalized = NormalizeForMatching($"{ruleId} {message}");
-
-        if (normalized.Contains("sqli", StringComparison.Ordinal) || normalized.Contains("sql", StringComparison.Ordinal))
-        {
-            return SqlCategoryFileName;
-        }
-
-        if (normalized.Contains("xss", StringComparison.Ordinal) || normalized.Contains("crosssitescripting", StringComparison.Ordinal))
-        {
-            return XssCategoryFileName;
-        }
-
-        if (normalized.Contains("secret", StringComparison.Ordinal)
-            || normalized.Contains("token", StringComparison.Ordinal)
-            || normalized.Contains("key", StringComparison.Ordinal))
-        {
-            return SecretCategoryFileName;
-        }
-
-        return DefaultCategoryFileName;
-    }
-
     private async Task<string> ReadModuleOrMissingCommentAsync(string modulePath, CancellationToken cancellationToken)
     {
         if (_fileCache.TryGetValue(modulePath, out var cachedContent))
@@ -327,16 +323,5 @@ Only alter `### [Data Flow Evidence]` according to the selected extraction strat
     {
         var relativePath = Path.GetRelativePath(_promptRootDirectory, path).Replace('\\', '/');
         return $"<!-- missing-prompt-module: {relativePath} -->";
-    }
-
-    private static string NormalizeForMatching(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-        {
-            return string.Empty;
-        }
-
-        var lowered = input.ToLowerInvariant();
-        return Regex.Replace(lowered, "[^a-z0-9]", string.Empty, RegexOptions.CultureInvariant);
     }
 }

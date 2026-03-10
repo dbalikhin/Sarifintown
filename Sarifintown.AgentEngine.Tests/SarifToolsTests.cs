@@ -751,7 +751,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
-                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompt"));
                 Assert.That(text, Contains.Substring("# Test Core Directive"));
             }
             finally
@@ -805,7 +805,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
-                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
                 Assert.That(text, Contains.Substring("Triage Analysis Instructions"));
                 Assert.That(text, Contains.Substring("# Test Core Directive"));
             }
@@ -869,7 +869,7 @@ namespace Sarifintown.AgentEngine.Tests
                     inputMarkdown: "evidence markdown");
                 var text = ((TextContentBlock)reviewResult.Content[0]).Text;
 
-                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompt"));
                 Assert.That(text, Contains.Substring("# Review Core Directive"));
             }
             finally
@@ -922,7 +922,7 @@ namespace Sarifintown.AgentEngine.Tests
                     inputMarkdown: "evidence markdown");
                 var text = ((TextContentBlock)reviewResult.Content[0]).Text;
 
-                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
             }
             finally
             {
@@ -1120,7 +1120,7 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(text, Contains.Substring("### Triage Analysis Instructions"));
                 Assert.That(text, Contains.Substring("# Core Directive"));
-                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompts"));
+                Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
             }
             finally
             {
