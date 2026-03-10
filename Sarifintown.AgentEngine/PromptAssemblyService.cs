@@ -6,8 +6,8 @@ namespace Sarifintown.AgentEngine;
 
 public sealed class PromptAssemblyService : IPromptAssemblyService
 {
-    private const string PromptsRootRelativePath = ".sarif/sarif_prompts";
-    private const string BundledPromptsDirectoryName = "sarif_prompts";
+    private const string PromptsRootRelativePath = ".sarif/sarifintown-prompts";
+    private const string BundledPromptsDirectoryName = "sarifintown-prompts";
     private const string BaseDirectoryName = "base";
     private const string CategoriesDirectoryName = "categories";
     private const string OverridesDirectoryName = "org-overrides";
