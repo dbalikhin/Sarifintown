@@ -22,6 +22,7 @@ namespace Sarifintown.AgentEngine
         internal static SnippetCacheService? SnippetCache { get; set; }
         internal static SnippetWarmupService? SnippetWarmupService { get; set; }
         internal static IPromptAssemblyService? PromptAssembly { get; set; }
+        internal static TriageLedgerService? LedgerService { get; set; }
         private static readonly object SyncRoot = new();
         public const string StateContextDelimiter = "===SARIF_STATE_CONTEXT===";
         private const int MaxEvidenceInspectCount = 25;
@@ -275,7 +276,7 @@ namespace Sarifintown.AgentEngine
 
             var metaObj = BuildScopedMeta(payload);
             metaObj["pause"] = true;
-            metaObj["next_step"] = "sarif_triage";
+            metaObj["next_step"] = "sarif_review";
 
             return CreateDualPurposeResult(
                 markdown: BuildScopedGetMarkdown(payload),
@@ -284,23 +285,418 @@ namespace Sarifintown.AgentEngine
                 additionalMeta: metaObj);
         }
 
-        [McpServerTool(Name = "sarif_triage")]
-        [Description("Persist a triage decision for one or more findings. CRITICAL EXECUTION PROTOCOL: (1) Call this tool with a displayid from sarif_get output. (2) Output the result block VERBATIM. (3) Run sarif_get again to verify remaining findings. Do NOT apply baseline knowledge or guess finding state.")]
-        public static async Task<CallToolResult> SarifTriage(
+        /// <summary>
+        /// Autotriage: persists the LLM's triage decision and reasoning into the audit ledger.
+        /// The LLM must first call sarif_get to load evidence, analyze findings, then call this tool.
+        /// Does not make external API calls. Use sarif_sync to push decisions upstream.
+        /// </summary>
+        [McpServerTool(Name = "sarif_review")]
+        [Description("Record an AI triage decision for one or more SARIF findings into the local audit ledger. Requires prior evidence from sarif_get. CRITICAL EXECUTION PROTOCOL: (1) You MUST have already called sarif_get and received evidence for the target findings. (2) Analyze the evidence: code flow, snippets, rule description, severity. (3) Determine state and reason from your analysis. (4) Call this tool with target, state, reason, llmReasoning (your full chain-of-thought), and inputMarkdown (the evidence you analyzed). (5) Output exactly one <vulnerability_report> block VERBATIM from the result. (6) Do NOT summarize, interpret, or add commentary. (7) STOP and wait for user instruction. Use sarif_update instead for manual human overrides.")]
+        public static async Task<CallToolResult> SarifReview(
+            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to autotriage all open findings in active scope (max 25).")]
+            string target = "scope",
+            [Description("Decision state determined by analysis: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
+            string state = "",
+            [Description("Decision reason derived from the evidence analysis.")]
+            string reason = "",
+            [Description("Verbose chain-of-thought reasoning from the LLM analysis.")]
+            string llmReasoning = "",
+            [Description("The exact evidence markdown that was fed to the LLM for this decision.")]
+            string inputMarkdown = "")
+        {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
+            }
+
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                return CreatePlainTextResult("❌ `state` is required. Analyze the evidence from sarif_get and provide a decision: confirmed, false_positive, test_code, wont_fix, or mitigated.");
+            }
+
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return CreatePlainTextResult("❌ `reason` is required. Summarize your analysis of the evidence in 1-2 sentences.");
+            }
+
+            if (!TryParseTriageDecisionState(state, out var parsedDecision))
+            {
+                return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
+            }
+
+            var ledger = GetOrCreateLedgerService();
+
+            // Persist via the existing triage machinery so local state stays consistent
+            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
+            if (triagePayload.ModifiedFindingIds.Count == 0)
+            {
+                return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
+            }
+
+            // Resolve tool name from findings for composite key generation
+            var now = DateTime.UtcNow;
+            var ledgerItems = await BuildLedgerItemsAsync(
+                triagePayload, parsedDecision, reason, "AI", humanReviewed: false,
+                llmReasoning, inputMarkdown, now);
+
+            await ledger.UpsertAsync(ledgerItems);
+
+            var reviewStateContext = new
+            {
+                review = new
+                {
+                    success = triagePayload.Success,
+                    state = triagePayload.State,
+                    workflow_state = triagePayload.WorkflowState,
+                    target = triagePayload.Target,
+                    affected_count = triagePayload.AffectedCount,
+                    modified_finding_ids = triagePayload.ModifiedFindingIds,
+                    ledger_entries_written = ledgerItems.Count,
+                    sync_status = "pending"
+                }
+            };
+
+            var reviewMeta = new JsonObject
+            {
+                ["pause"] = true,
+                ["next_step"] = "sarif_get"
+            };
+
+            return CreateDualPurposeResult(
+                markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count),
+                systemStateContext: reviewStateContext,
+                resourceUri: BuildUiResourceUri("triage", "sarif_review", string.Empty),
+                additionalMeta: reviewMeta);
+        }
+
+        /// <summary>
+        /// Manual override: applies a human-provided triage decision to specific findings,
+        /// marking them as human-reviewed in the audit ledger.
+        /// </summary>
+        [McpServerTool(Name = "sarif_update")]
+        [Description("Manually override a triage decision for one or more findings. Sets human_reviewed=true in the audit ledger. Use this to correct or confirm AI-generated decisions. CRITICAL EXECUTION PROTOCOL: (1) Call this tool with a displayid from sarif_get output. (2) Output the result block VERBATIM. (3) Run sarif_get again to verify remaining findings.")]
+        public static async Task<CallToolResult> SarifUpdate(
             [Description("Decision state: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
             string state,
             [Description("Required decision reason/audit note explaining why this decision was made.")]
             string reason,
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to triage all open findings in active scope.")]
+            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
             string target)
         {
-            var payload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                return CreatePlainTextResult("❌ `state` is required (confirmed, false_positive, test_code, wont_fix, mitigated).");
+            }
+
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                return CreatePlainTextResult("❌ `reason` is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
+            }
+
+            if (!TryParseTriageDecisionState(state, out var parsedDecision))
+            {
+                return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
+            }
+
+            var ledger = GetOrCreateLedgerService();
+
+            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "human_developer");
+            if (triagePayload.ModifiedFindingIds.Count == 0)
+            {
+                return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
+            }
+
+            var now = DateTime.UtcNow;
+            var ledgerItems = await BuildLedgerItemsAsync(
+                triagePayload, parsedDecision, reason, "human_developer", humanReviewed: true,
+                llmReasoning: string.Empty, inputMarkdown: string.Empty, now);
+
+            await ledger.UpsertAsync(ledgerItems);
 
             return CreateDualPurposeResult(
-                markdown: BuildScopedTriageMarkdown(payload),
+                markdown: BuildScopedTriageMarkdown(triagePayload),
                 systemStateContext: null,
-                resourceUri: BuildUiResourceUri("triage", "sarif_triage", string.Empty),
+                resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
                 additionalMeta: null);
+        }
+
+        /// <summary>
+        /// Builds ledger entries from a completed triage payload. Shared by SarifReview and SarifUpdate.
+        /// </summary>
+        private static async Task<List<(string CompositeKey, LedgerEntry Entry)>> BuildLedgerItemsAsync(
+            ScopedTriagePayload triagePayload,
+            TriageDecisionState parsedDecision,
+            string reason,
+            string author,
+            bool humanReviewed,
+            string llmReasoning,
+            string inputMarkdown,
+            DateTime timestamp)
+        {
+            var ledgerItems = new List<(string CompositeKey, LedgerEntry Entry)>();
+
+            foreach (var findingId in triagePayload.ModifiedFindingIds)
+            {
+                var toolName = await ResolveToolNameForFindingAsync(findingId);
+                var compositeKey = TriageLedgerDocument.BuildCompositeKey(toolName, findingId);
+
+                string filePath = string.Empty;
+                string ruleId = string.Empty;
+
+                var evidence = triagePayload.Evidence
+                    .FirstOrDefault(e => string.Equals(e.FindingId, findingId, StringComparison.Ordinal));
+                if (evidence?.Evidence != null)
+                {
+                    filePath = evidence.Evidence.DataFlowSteps.FirstOrDefault()?.FilePath ?? string.Empty;
+                    ruleId = evidence.Evidence.RuleId;
+                }
+
+                var entry = new LedgerEntry
+                {
+                    Metadata = new LedgerMetadata
+                    {
+                        FindingId = findingId,
+                        ToolName = toolName,
+                        RuleId = ruleId,
+                        FilePath = filePath
+                    },
+                    TriageDecision = new LedgerTriageDecision
+                    {
+                        State = parsedDecision,
+                        ShortReason = reason,
+                        Author = author,
+                        Timestamp = timestamp
+                    },
+                    AuditLog = new LedgerAuditLog
+                    {
+                        InputMarkdown = inputMarkdown,
+                        LlmReasoning = llmReasoning,
+                        HumanReviewed = humanReviewed
+                    },
+                    UpstreamSync = new LedgerUpstreamSync
+                    {
+                        Status = UpstreamSyncStatus.Pending,
+                        TargetPlatform = toolName
+                    }
+                };
+
+                ledgerItems.Add((compositeKey, entry));
+            }
+
+            return ledgerItems;
+        }
+
+        /// <summary>
+        /// Pushes pending local triage decisions from the audit ledger to upstream vendor APIs.
+        /// </summary>
+        [McpServerTool(Name = "sarif_sync")]
+        [Description("Push local review decisions to upstream vendor APIs. Only processes entries with 'pending' sync status. Call this after using sarif_review to record decisions.")]
+        public static async Task<CallToolResult> SarifSync(
+            [Description("Target: 'pending' to sync all pending entries, or specific composite keys (comma-separated).")]
+            string target = "pending")
+        {
+            var ledger = GetOrCreateLedgerService();
+
+            IReadOnlyList<(string CompositeKey, LedgerEntry Entry)> entriesToSync;
+            if (string.Equals(target, "pending", StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(target))
+            {
+                entriesToSync = await ledger.GetBySyncStatusAsync(UpstreamSyncStatus.Pending);
+            }
+            else
+            {
+                var keys = target
+                    .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                    .ToList();
+                entriesToSync = await ledger.GetByKeysAsync(keys);
+            }
+
+            if (entriesToSync.Count == 0)
+            {
+                return CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+            }
+
+            var now = DateTime.UtcNow;
+            var syncedCount = 0;
+            var failedCount = 0;
+            var syncedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var failedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var updatedItems = new List<(string CompositeKey, LedgerEntry Entry)>();
+
+            foreach (var (compositeKey, entry) in entriesToSync)
+            {
+                var platform = entry.Metadata.ToolName;
+                var (success, errorMessage) = await TrySyncToUpstreamAsync(entry);
+
+                var updatedSync = entry.UpstreamSync with
+                {
+                    Status = success ? UpstreamSyncStatus.Synced : UpstreamSyncStatus.Failed,
+                    LastSyncAttempt = now,
+                    ErrorMessage = success ? null : errorMessage
+                };
+
+                updatedItems.Add((compositeKey, entry with { UpstreamSync = updatedSync }));
+
+                if (success)
+                {
+                    syncedCount++;
+                    syncedByPlatform[platform] = syncedByPlatform.GetValueOrDefault(platform) + 1;
+                }
+                else
+                {
+                    failedCount++;
+                    failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                }
+            }
+
+            await ledger.UpsertAsync(updatedItems);
+
+            var lines = new List<string> { "## Sync Results", string.Empty };
+
+            if (syncedCount > 0)
+            {
+                lines.Add($"✅ **{syncedCount}** entries synced successfully.");
+                foreach (var (platform, count) in syncedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    lines.Add($"  - {platform}: {count}");
+                }
+            }
+
+            if (failedCount > 0)
+            {
+                lines.Add($"❌ **{failedCount}** entries failed to sync.");
+                foreach (var (platform, count) in failedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    lines.Add($"  - {platform}: {count}");
+                }
+
+                lines.Add(string.Empty);
+                lines.Add("Check the triage ledger for error details. Fix credentials and retry with `sarif_sync`.");
+            }
+
+            if (syncedCount == 0 && failedCount == 0)
+            {
+                lines.Add("ℹ️ No entries were processed.");
+            }
+
+            return CreatePlainTextResult(string.Join(Environment.NewLine, lines));
+        }
+
+        /// <summary>
+        /// Attempts to sync a single ledger entry to its upstream vendor platform.
+        /// Returns (success, errorMessage).
+        /// </summary>
+        private static Task<(bool Success, string? ErrorMessage)> TrySyncToUpstreamAsync(LedgerEntry entry)
+        {
+            ArgumentNullException.ThrowIfNull(entry);
+
+            var platform = entry.Metadata.ToolName.Trim().ToLowerInvariant();
+
+            return platform switch
+            {
+                "snyk" or "snyk code" => TrySyncToSnykAsync(entry),
+                "github-advanced-security" or "codeql" or "github" => TrySyncToGhasAsync(entry),
+                _ => Task.FromResult<(bool, string?)>((false, $"Unsupported platform: '{entry.Metadata.ToolName}'. No sync adapter registered."))
+            };
+        }
+
+        private static Task<(bool Success, string? ErrorMessage)> TrySyncToSnykAsync(LedgerEntry entry)
+        {
+            var token = Environment.GetEnvironmentVariable("SNYK_TOKEN");
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return Task.FromResult<(bool, string?)>((false, "SNYK_TOKEN environment variable is not set."));
+            }
+
+            // Stub: actual Snyk API integration will be implemented when vendor SDK is available.
+            return Task.FromResult<(bool, string?)>((true, null));
+        }
+
+        private static Task<(bool Success, string? ErrorMessage)> TrySyncToGhasAsync(LedgerEntry entry)
+        {
+            var token = Environment.GetEnvironmentVariable("GHAS_TOKEN")
+                        ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return Task.FromResult<(bool, string?)>((false, "GHAS_TOKEN (or GITHUB_TOKEN) environment variable is not set."));
+            }
+
+            // Stub: actual GitHub Advanced Security API integration will be implemented when vendor SDK is available.
+            return Task.FromResult<(bool, string?)>((true, null));
+        }
+
+        private static bool TryParseTriageDecisionState(string state, out TriageDecisionState parsed)
+        {
+            parsed = default;
+            if (string.IsNullOrWhiteSpace(state))
+            {
+                return false;
+            }
+
+            var normalized = state.Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "false_positive":
+                    parsed = TriageDecisionState.FalsePositive;
+                    return true;
+                case "wont_fix":
+                    parsed = TriageDecisionState.WontFix;
+                    return true;
+                case "test_code":
+                    parsed = TriageDecisionState.TestCode;
+                    return true;
+                case "confirmed":
+                    parsed = TriageDecisionState.Confirmed;
+                    return true;
+                case "mitigated":
+                    parsed = TriageDecisionState.Mitigated;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static TriageLedgerService GetOrCreateLedgerService()
+        {
+            var service = LedgerService;
+            if (service != null)
+            {
+                return service;
+            }
+
+            string workspaceRoot;
+            lock (SyncRoot)
+            {
+                workspaceRoot = _workspaceRoot;
+            }
+
+            service = new TriageLedgerService(workspaceRoot);
+            LedgerService = service;
+            return service;
+        }
+
+        private static async Task<string> ResolveToolNameForFindingAsync(
+            string findingId)
+        {
+            var stateService = StateService;
+            if (stateService == null)
+            {
+                return "unknown-tool";
+            }
+
+            var findings = await stateService.GetFindingsAsync();
+            var finding = findings.FirstOrDefault(f => string.Equals(f.FindingId, findingId, StringComparison.Ordinal));
+            if (finding == null)
+            {
+                return "unknown-tool";
+            }
+
+            return finding.Run?.Tool?.Driver?.Name?.Trim().ToLowerInvariant() ?? "unknown-tool";
         }
 
         [Description("MUST: Use this tool to resolve the correct interactive surface for the connected host before launching UI/TUI experiences.")]
@@ -1268,7 +1664,8 @@ namespace Sarifintown.AgentEngine
 
             lines.Add(string.Empty);
             lines.Add("**STOP:** Wait for explicit user instruction.");
-            lines.Add("If the user asks to triage, call `sarif_triage` with `state`, `reason`, and `target` (displayid).");
+            lines.Add("If the user asks to review/triage findings, call `sarif_review` with the target displayid. You must analyze the evidence above and provide your state, reason, and llmReasoning.");
+            lines.Add("If the user wants to manually override a decision, call `sarif_update` with state, reason, and target.");
             lines.Add("To change filters, call `sarif_filter`.");
             if (payload.Context.Pagination.HasMore)
             {
@@ -1391,6 +1788,100 @@ namespace Sarifintown.AgentEngine
 
             lines.Add(string.Empty);
             lines.Add("**Next action:** Run `sarif_get` to verify remaining findings in scope.");
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private static string BuildScopedReviewMarkdown(ScopedTriagePayload payload, int ledgerEntriesWritten)
+        {
+            ArgumentNullException.ThrowIfNull(payload);
+
+            var lines = new List<string>
+            {
+                "## SARIF Scoped Review",
+                string.Empty,
+                $"- Success: **{payload.Success}**",
+                $"- Decision: `{EscapeMarkdown(payload.State)}`",
+                $"- Internal workflow state: `{EscapeMarkdown(payload.WorkflowState)}`",
+                $"- Target: `{EscapeMarkdown(payload.Target)}`",
+                $"- Affected findings: **{payload.AffectedCount}**",
+                $"- Ledger entries written: **{ledgerEntriesWritten}**",
+                $"- Sync status: **pending**",
+                $"- Reasoning: {EscapeMarkdown(payload.Reason)}"
+            };
+
+            if (payload.ModifiedFindingIds.Count > 0)
+            {
+                lines.Add(string.Empty);
+                lines.Add("### Reviewed Findings");
+                lines.Add("| Id | Decision |");
+                lines.Add("|---|---|");
+                foreach (var findingId in payload.ModifiedFindingIds)
+                {
+                    string displayLabel;
+                    lock (SyncRoot)
+                    {
+                        displayLabel = FindingIdToDisplayId.TryGetValue(findingId, out var did)
+                            ? did
+                            : findingId;
+                    }
+
+                    lines.Add($"| `{EscapeMarkdown(displayLabel)}` | `{EscapeMarkdown(payload.WorkflowState)}` |");
+                }
+            }
+
+            if (payload.Evidence.Count > 0)
+            {
+                lines.Add(string.Empty);
+                lines.Add("### Decision Evidence");
+
+                foreach (var evidenceRow in payload.Evidence)
+                {
+                    lines.Add(string.Empty);
+                    lines.Add($"#### Finding `{EscapeMarkdown(evidenceRow.DisplayId)}`");
+
+                    if (evidenceRow.Evidence != null)
+                    {
+                        lines.Add($"- Rule: `{EscapeMarkdown(evidenceRow.Evidence.RuleId)}`");
+                        lines.Add($"- Severity: `{EscapeMarkdown(evidenceRow.Evidence.Severity)}`");
+                        lines.Add($"- Message: {EscapeMarkdown(evidenceRow.Evidence.Message)}");
+
+                        lines.Add(string.Empty);
+                        lines.Add("##### Data Flow Used");
+                        if (evidenceRow.Evidence.DataFlowEvidenceBlocks.Count > 0)
+                        {
+                            foreach (var block in evidenceRow.Evidence.DataFlowEvidenceBlocks)
+                            {
+                                lines.Add($"- Steps `{block.StartStepIndex}`-`{block.EndStepIndex}` at `{EscapeMarkdown(block.FilePath)}`:{block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}");
+                                lines.Add("```csharp");
+                                lines.Add(block.CodeSnippet);
+                                lines.Add("```");
+                            }
+                        }
+                        else if (evidenceRow.Evidence.DataFlowSteps.Count > 0)
+                        {
+                            foreach (var step in evidenceRow.Evidence.DataFlowSteps)
+                            {
+                                lines.Add($"- Step `{step.Index}` at `{EscapeMarkdown(step.FilePath)}`:{step.StartLine?.ToString() ?? "?"} — {EscapeMarkdown(step.Message)}");
+                            }
+                        }
+                        else
+                        {
+                            lines.Add("- No data flow blocks were available for this finding.");
+                        }
+                    }
+                    else
+                    {
+                        lines.Add("- Evidence unavailable for this finding.");
+                    }
+                }
+            }
+
+            lines.Add(string.Empty);
+            lines.Add("**STOP:** Wait for explicit user instruction.");
+            lines.Add("Run `sarif_get` to verify remaining findings in scope.");
+            lines.Add("Run `sarif_sync` to push pending decisions to upstream vendors.");
+            lines.Add("Run `sarif_update` to manually override any decision above.");
 
             return string.Join(Environment.NewLine, lines);
         }

@@ -205,7 +205,12 @@ static IReadOnlyList<string> ResolveCompletionValues(
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },
-        "sarif_triage" => normalizedArgument switch
+        "sarif_review" => normalizedArgument switch
+        {
+            "target" => new[] { "scope" },
+            _ => Array.Empty<string>()
+        },
+        "sarif_update" => normalizedArgument switch
         {
             "state" => completionData.DecisionStates,
             "reason" => completionData.Reasons,

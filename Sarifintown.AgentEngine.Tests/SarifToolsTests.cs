@@ -248,7 +248,7 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(secondMeta.GetProperty("context").GetProperty("pagination").GetProperty("has_more").GetBoolean(), Is.False);
                 Assert.That(secondMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
 
-                var triageResult = await SarifTools.SarifTriage(state: "confirmed", reason: "page-token", target: "1");
+                var triageResult = await SarifTools.SarifUpdate(state: "confirmed", reason: "page-token", target: "1");
                 var triageText = triageResult.Content[0] as TextContentBlock;
 
                 Assert.That(triageText, Is.Not.Null);
@@ -268,7 +268,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifTriage_WithDisplayAliasTarget_ResolvesToUnderlyingFindingId()
+        public async Task SarifUpdate_WithDisplayAliasTarget_ResolvesToUnderlyingFindingId()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -307,7 +307,7 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(alias, Is.Not.Null.And.Not.Empty);
 
-                var triageResult = await SarifTools.SarifTriage(
+                var triageResult = await SarifTools.SarifUpdate(
                     state: "confirmed",
                     reason: "alias-validated",
                     target: alias!);
@@ -415,7 +415,7 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(setMeta.GetProperty("context").GetProperty("active_scope").GetProperty("severity").GetString(), Is.EqualTo("high"));
                 Assert.That(setMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(1));
                 Assert.That(setMeta.GetProperty("pause").GetBoolean(), Is.True);
-                Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_triage"));
+                Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_review"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Scoped Query"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
@@ -528,7 +528,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifTriage_WithScopeTarget_AppliesDecisionToActiveScope()
+        public async Task SarifUpdate_WithScopeTarget_AppliesDecisionToActiveScope()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -569,7 +569,7 @@ namespace Sarifintown.AgentEngine.Tests
                 await SarifTools.SarifFilter("severity:high");
                 await SarifTools.SarifGet(limit: 10);
 
-                var triageResult = await SarifTools.SarifTriage(
+                var triageResult = await SarifTools.SarifUpdate(
                     state: "confirmed",
                     reason: "validated",
                     target: "scope");
@@ -585,10 +585,10 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public void SarifTriage_WithInvalidState_ThrowsArgumentException()
+        public void SarifUpdate_WithInvalidState_ThrowsArgumentException()
         {
             Assert.ThrowsAsync<ArgumentException>(async () =>
-                await SarifTools.SarifTriage(state: "tp", reason: "invalid", target: "scope"));
+                await SarifTools.SarifUpdate(state: "tp", reason: "invalid", target: "scope"));
         }
 
         [Test]
@@ -646,7 +646,7 @@ namespace Sarifintown.AgentEngine.Tests
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .ToList();
 
-            Assert.That(toolMethods, Is.EqualTo(new[] { "SarifFilter", "SarifGet", "SarifTriage" }));
+            Assert.That(toolMethods, Is.EqualTo(new[] { "SarifFilter", "SarifGet", "SarifReview", "SarifSync", "SarifUpdate" }));
         }
 
         [Test]
@@ -801,7 +801,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifTriage_WithSingleTarget_ShowsModifiedFindingsSection()
+        public async Task SarifUpdate_WithSingleTarget_ShowsModifiedFindingsSection()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -834,7 +834,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
-                var triageResult = await SarifTools.SarifTriage(
+                var triageResult = await SarifTools.SarifUpdate(
                     state: "false_positive",
                     reason: "test code only",
                     target: displayId!);
@@ -853,7 +853,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifTriage_WithPromptAssemblyAndDataFlow_IncludesEvidenceWithoutPromptProvenance()
+        public async Task SarifUpdate_WithPromptAssemblyAndDataFlow_IncludesEvidenceWithoutPromptProvenance()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -927,7 +927,7 @@ namespace Sarifintown.AgentEngine.Tests
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
-                var triageResult = await SarifTools.SarifTriage(
+                var triageResult = await SarifTools.SarifUpdate(
                     state: "confirmed",
                     reason: "confirmed-from-flow",
                     target: displayId!);

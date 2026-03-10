@@ -48,7 +48,7 @@ internal static class SpectreCliMenu
             "Triage status" => await RenderStatusAsync(cancellationToken),
             "Triage list" => await RenderListAsync(cancellationToken),
             "Triage decision" => await RenderTriageAsync(cancellationToken),
-            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_triage flow: {action}" }),
+            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_review flow: {action}" }),
             _ => JsonSerializer.Serialize(new { success = false, message = $"Unsupported action: {action}" })
         };
     }
@@ -85,7 +85,7 @@ internal static class SpectreCliMenu
         var target = AnsiConsole.Ask<string>("Target (alias like 1/@1/S-01, CSV aliases, raw ID, or scope):", "scope");
 
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifTriage(state, reason, target);
+        var result = await SarifTools.SarifUpdate(state, reason, target);
         return RenderDualPurposeText(result);
     }
 
