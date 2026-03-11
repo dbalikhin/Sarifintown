@@ -37,7 +37,7 @@ public static class SarifPrompts
     /// Builds a slash-command prompt for reading SARIF findings with current filters.
     /// </summary>
     [McpServerPrompt(Name = "sarif_get", Title = "Get Triage Posture")]
-    [Description("Retrieve posture summary and prioritized findings using the active filter.")]
+    [Description("Load a lightweight paginated findings index (ID, Rule, Severity, File Path). Call this FIRST in the sequential flow before sarif_review and sarif_update.")]
     public static string TriageQueryPrompt(
         [Description("Maximum finding count to return.")]
         int limit = 10,
@@ -57,46 +57,49 @@ public static class SarifPrompts
     }
 
     /// <summary>
-    /// Builds a slash-command prompt for autotriaging findings using LLM analysis.
-    /// The LLM loads evidence, analyzes each finding, and autonomously determines the triage decision.
+    /// Builds a slash-command prompt for loading code evidence and organizational rules before triage.
+    /// The LLM receives deep code flows and the assembled organizational rules, then calls sarif_update.
     /// </summary>
     [McpServerPrompt(Name = "sarif_review", Title = "Review Findings")]
-    [Description("Autotriage the currently scoped findings. Loads evidence, analyzes each finding, determines a decision, and records it with full LLM reasoning into the local audit ledger.")]
+    [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability.")]
     public static string ReviewPrompt(
         [Description("Target displayid, CSV displayid list, or 'scope' (max 25).")]
         string target = "scope")
     {
         return $"""
             EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` to load findings with evidence for target='{target}'.
-            2. For each finding in the result, analyze the evidence: code flow, snippets, rule description, severity.
-            3. Determine the appropriate decision state (confirmed, false_positive, test_code, wont_fix, mitigated) and formulate a 1-2 sentence reason from the evidence.
-            4. Call `sarif_review` with target='{target}', state=<your decision>, reason=<your reason>,
-               llmReasoning=<your full chain-of-thought analysis>, inputMarkdown=<the evidence you analyzed>.
-            5. Output exactly one <vulnerability_report> block VERBATIM from the result. Do NOT summarize, interpret, or add commentary.
+            1. Call `sarif_get` to obtain the list of findings and their displayids.
+            2. Call `sarif_review` with target='{target}' to load code evidence and organizational rules.
+            3. Analyze the evidence using the rules in the <system_directive> block returned by sarif_review.
+            4. Call `sarif_update` with target='{target}', state=<your decision>, reason=<your reason>, llmReasoning=<your full chain-of-thought>.
+            5. Output exactly one <vulnerability_report> block VERBATIM from the sarif_update result. Do NOT summarize, interpret, or add commentary.
             6. STOP and wait for user instruction.
             """;
     }
 
     /// <summary>
-    /// Builds a slash-command prompt for manually overriding a triage decision.
-    /// Sets human_reviewed=true in the audit ledger.
+    /// Builds a slash-command prompt for recording a triage decision.
+    /// Handles both AI-driven triage (with llmReasoning) and human manual overrides (without llmReasoning).
     /// </summary>
     [McpServerPrompt(Name = "sarif_update", Title = "Update Triage Decision")]
-    [Description("Manually override a triage decision for one or many findings. Marks the decision as human-reviewed in the audit ledger.")]
+    [Description("Record a triage decision. Call this AFTER analyzing the output of sarif_review.")]
     public static string UpdatePrompt(
         [Description("Decision state (confirmed, false_positive, test_code, wont_fix, mitigated).")]
         string state,
         [Description("Required decision reason.")]
         string reason,
         [Description("Target displayid, CSV displayid list, or 'scope'.")]
-        string target = "scope")
+        string target = "scope",
+        [Description("Optional AI chain-of-thought. Provide for AI triage. Omit for explicit human manual overrides.")]
+        string llmReasoning = "")
     {
         return $"""
             EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_update` with state='{state}', reason='{reason}', target='{target}'.
-            2. Output the result block VERBATIM. Do NOT add commentary.
-            3. Call `sarif_get` to verify remaining findings.
+            1. Call `sarif_get` to identify the exact target displayid if needed.
+            2. Call `sarif_review` with target='{target}' if analysis evidence has not been loaded yet.
+            3. Call `sarif_update` with target='{target}', state='{state}', reason='{reason}', and llmReasoning='{llmReasoning}'.
+            4. Output the result block VERBATIM. Do NOT add commentary.
+            5. Call `sarif_get` to verify remaining findings.
             """;
     }
 

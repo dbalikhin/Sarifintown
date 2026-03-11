@@ -35,8 +35,6 @@ namespace Sarifintown.AgentEngine
         private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
         private static int _nextDisplayId = 1;
-        private static bool _debugPromptEnabled;
-        private static bool _includeEvidenceByDefault = true;
         private static HashSet<string> _availableSeverities = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableRules = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableStatuses = new(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
@@ -109,28 +107,6 @@ namespace Sarifintown.AgentEngine
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                     .ToList();
-            }
-        }
-
-        /// <summary>
-        /// Enables or disables prompt debug mode for `sarif_get` at server startup.
-        /// </summary>
-        public static void SetDebugPromptEnabled(bool enabled)
-        {
-            lock (SyncRoot)
-            {
-                _debugPromptEnabled = enabled;
-            }
-        }
-
-        /// <summary>
-        /// Sets the default evidence inclusion behavior for `sarif_get` at server startup.
-        /// </summary>
-        public static void SetIncludeEvidenceByDefault(bool enabled)
-        {
-            lock (SyncRoot)
-            {
-                _includeEvidenceByDefault = enabled;
             }
         }
 
@@ -224,7 +200,7 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. Evidence inclusion and debug prompt output are controlled only by server startup settings. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters.")]
+        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. Returns a paginated index of findings. CRITICAL EXECUTION PROTOCOL: (1) Output the content inside the <vulnerability_report> block VERBATIM. (2) Do NOT summarize, interpret, restate, or duplicate. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters. To triage a finding, call sarif_review with the target displayid to load code evidence and organizational rules.")]
         public static async Task<CallToolResult> SarifGet(
             [Description("Maximum findings to return (1-25).")]
             int limit = 10,
@@ -234,15 +210,8 @@ namespace Sarifintown.AgentEngine
             string pageToken = "")
         {
             var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
-            bool debugPromptEnabled;
-            bool includeEvidenceByDefault;
-            lock (SyncRoot)
-            {
-                debugPromptEnabled = _debugPromptEnabled;
-                includeEvidenceByDefault = _includeEvidenceByDefault;
-            }
 
-            var payload = await ExecutePureGetAsync(includeEvidenceByDefault, safeLimit, page, debugPromptEnabled, pageToken);
+            var payload = await ExecutePureGetAsync(safeLimit, page, pageToken);
             var stateContext = new
             {
                 context = new
@@ -286,103 +255,98 @@ namespace Sarifintown.AgentEngine
         }
 
         /// <summary>
-        /// Autotriage: persists the LLM's triage decision and reasoning into the audit ledger.
-        /// The LLM must first call sarif_get to load evidence, analyze findings, then call this tool.
-        /// Does not make external API calls. Use sarif_sync to push decisions upstream.
+        /// Context injector: loads deep code evidence and organizational rules for the LLM to analyze.
+        /// After analyzing the output, the LLM should call sarif_update to record its decision.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Record an AI triage decision for one or more SARIF findings into the local audit ledger. Requires prior evidence from sarif_get. CRITICAL EXECUTION PROTOCOL: (1) You MUST have already called sarif_get and received evidence for the target findings. (2) Analyze the evidence: code flow, snippets, rule description, severity. (3) Determine state and reason from your analysis. (4) Call this tool with target, state, reason, llmReasoning (your full chain-of-thought), and inputMarkdown (the evidence you analyzed). (5) Output exactly one <vulnerability_report> block VERBATIM from the result. (6) Do NOT summarize, interpret, or add commentary. (7) STOP and wait for user instruction. Use sarif_update instead for manual human overrides.")]
+        [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability before calling sarif_update. CRITICAL EXECUTION PROTOCOL: (1) Call sarif_get first to get target displayids. (2) Call sarif_review with the target displayid(s) to load code evidence and organizational rules. (3) Analyze the evidence using the rules in the system directive. (4) Call sarif_update with your target, state, reason, and llmReasoning. Do NOT stop after this tool; proceed with analysis immediately.")]
         public static async Task<CallToolResult> SarifReview(
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to autotriage all open findings in active scope (max 25).")]
-            string target = "scope",
-            [Description("Decision state determined by analysis: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
-            string state = "",
-            [Description("Decision reason derived from the evidence analysis.")]
-            string reason = "",
-            [Description("Verbose chain-of-thought reasoning from the LLM analysis.")]
-            string llmReasoning = "",
-            [Description("The exact evidence markdown that was fed to the LLM for this decision.")]
-            string inputMarkdown = "")
+            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to review all open findings in active scope (max 25).")]
+            string target)
         {
             if (string.IsNullOrWhiteSpace(target))
             {
                 return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
             }
 
-            if (string.IsNullOrWhiteSpace(state))
+            var workflow = CreateTriageWorkflowService();
+            List<string> targetIds;
+
+            if (string.Equals(target, "scope", StringComparison.OrdinalIgnoreCase))
             {
-                return CreatePlainTextResult("❌ `state` is required. Analyze the evidence from sarif_get and provide a decision: confirmed, false_positive, test_code, wont_fix, or mitigated.");
+                var activeScope = GetActiveScope();
+                var scopedFindings = await workflow.ListAsync(activeScope.ToQueryOptions(MaxEvidenceInspectCount));
+                targetIds = scopedFindings
+                    .Where(item => string.Equals(item.State, TriageFindingState.Open.ToString(), StringComparison.OrdinalIgnoreCase))
+                    .Select(item => item.FindingId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(MaxEvidenceInspectCount)
+                    .ToList();
+            }
+            else
+            {
+                targetIds = ResolveFindingIds(target)
+                    .Select(ResolveFindingIdFromAliasOrRaw)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
             }
 
-            if (string.IsNullOrWhiteSpace(reason))
-            {
-                return CreatePlainTextResult("❌ `reason` is required. Summarize your analysis of the evidence in 1-2 sentences.");
-            }
-
-            if (!TryParseTriageDecisionState(state, out var parsedDecision))
-            {
-                return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
-            }
-
-            var ledger = GetOrCreateLedgerService();
-
-            // Persist via the existing triage machinery so local state stays consistent
-            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
-            if (triagePayload.ModifiedFindingIds.Count == 0)
+            if (targetIds.Count == 0)
             {
                 return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
             }
 
-            // Resolve tool name from findings for composite key generation
-            var now = DateTime.UtcNow;
-            var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, "AI", humanReviewed: false,
-                llmReasoning, inputMarkdown, now);
+            var evidenceByFindingId = await workflow.InspectManyAsync(targetIds);
 
-            await ledger.UpsertAsync(ledgerItems);
-
-            var reviewStateContext = new
+            var promptAssembly = PromptAssembly;
+            string? systemDirective = null;
+            if (promptAssembly != null && evidenceByFindingId.Count > 0)
             {
-                review = new
-                {
-                    success = triagePayload.Success,
-                    state = triagePayload.State,
-                    workflow_state = triagePayload.WorkflowState,
-                    target = triagePayload.Target,
-                    affected_count = triagePayload.AffectedCount,
-                    modified_finding_ids = triagePayload.ModifiedFindingIds,
-                    ledger_entries_written = ledgerItems.Count,
-                    sync_status = "pending"
-                }
-            };
+                var findingsForPrompt = evidenceByFindingId.Values
+                    .Select(e => (e.RuleId, e.Message))
+                    .ToList();
+                systemDirective = await promptAssembly.BuildBatchTriagePromptAsync(findingsForPrompt).ConfigureAwait(false);
+            }
+
+            var reviewMarkdown = BuildReviewContextMarkdown(target, evidenceByFindingId, systemDirective);
+
+            await AppendToExecutionLogAsync("sarif_review",
+                $"Target: {target}\n\nEvidence:\n{reviewMarkdown}\n\nSystem Directive:\n{systemDirective ?? "(none)"}").ConfigureAwait(false);
 
             var reviewMeta = new JsonObject
             {
-                ["pause"] = true,
-                ["next_step"] = "sarif_get"
+                ["next_step"] = "sarif_update"
             };
 
-            return CreateDualPurposeResult(
-                markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count, await BuildReviewDebugPromptsAsync(triagePayload)),
-                systemStateContext: reviewStateContext,
+            return CreateReviewContextResult(
+                reviewMarkdown,
                 resourceUri: BuildUiResourceUri("triage", "sarif_review", string.Empty),
                 additionalMeta: reviewMeta);
         }
 
         /// <summary>
-        /// Manual override: applies a human-provided triage decision to specific findings,
-        /// marking them as human-reviewed in the audit ledger.
+        /// Unified writer: records a triage decision into the audit ledger.
+        /// AI callers must supply llmReasoning after analyzing evidence from sarif_review.
+        /// Human callers omit llmReasoning to mark the decision as human-reviewed.
         /// </summary>
         [McpServerTool(Name = "sarif_update")]
-        [Description("Manually override a triage decision for one or more findings. Sets human_reviewed=true in the audit ledger. Use this to correct or confirm AI-generated decisions. CRITICAL EXECUTION PROTOCOL: (1) Call this tool with a displayid from sarif_get output. (2) Output the result block VERBATIM. (3) Run sarif_get again to verify remaining findings.")]
+        [Description("Record a triage decision. If you are the AI analyzing evidence, you MUST provide your 'llmReasoning'. If a human user explicitly tells you to update a finding, leave 'llmReasoning' empty. CRITICAL EXECUTION PROTOCOL: (1) Call this tool after analyzing sarif_review output. (2) Output the result block VERBATIM. (3) Run sarif_get to verify remaining findings.")]
         public static async Task<CallToolResult> SarifUpdate(
+            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
+            string target,
             [Description("Decision state: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
             string state,
-            [Description("Required decision reason/audit note explaining why this decision was made.")]
+            [Description("Decision reason explaining why this decision was made.")]
             string reason,
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
-            string target)
+            [Description("Verbose chain-of-thought analysis. REQUIRED for AI callers. OMIT for human manual overrides.")]
+            string llmReasoning = "")
         {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
+            }
+
             if (string.IsNullOrWhiteSpace(state))
             {
                 return CreatePlainTextResult("❌ `state` is required (confirmed, false_positive, test_code, wont_fix, mitigated).");
@@ -393,30 +357,79 @@ namespace Sarifintown.AgentEngine
                 return CreatePlainTextResult("❌ `reason` is required.");
             }
 
-            if (string.IsNullOrWhiteSpace(target))
-            {
-                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
-            }
-
             if (!TryParseTriageDecisionState(state, out var parsedDecision))
             {
                 return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
             }
 
+            var isAiTriage = !string.IsNullOrWhiteSpace(llmReasoning);
+            var author = isAiTriage ? "AI" : "human_developer";
             var ledger = GetOrCreateLedgerService();
 
-            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "human_developer");
+            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, author);
             if (triagePayload.ModifiedFindingIds.Count == 0)
             {
                 return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
             }
 
+            // For AI triage: silently re-assemble the organizational rules prompt for the audit trail
+            string? systemPromptUsed = null;
+            if (isAiTriage)
+            {
+                var promptAssembly = PromptAssembly;
+                if (promptAssembly != null && triagePayload.Evidence.Count > 0)
+                {
+                    var findingsForPrompt = triagePayload.Evidence
+                        .Where(e => e.Evidence != null)
+                        .Select(e => (e.Evidence!.RuleId, e.Evidence!.Message))
+                        .ToList();
+                    if (findingsForPrompt.Count > 0)
+                    {
+                        systemPromptUsed = await promptAssembly.BuildBatchTriagePromptAsync(findingsForPrompt).ConfigureAwait(false);
+                    }
+                }
+            }
+
             var now = DateTime.UtcNow;
             var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, "human_developer", humanReviewed: true,
-                llmReasoning: string.Empty, inputMarkdown: string.Empty, now);
+                triagePayload, parsedDecision, reason, author,
+                humanReviewed: !isAiTriage,
+                llmReasoning, now, systemPromptUsed);
 
             await ledger.UpsertAsync(ledgerItems);
+
+            await AppendToExecutionLogAsync("sarif_update",
+                $"Target: {target}\nState: {state}\nReason: {reason}\nllmReasoning: {llmReasoning}").ConfigureAwait(false);
+
+            if (isAiTriage)
+            {
+                var reviewStateContext = new
+                {
+                    review = new
+                    {
+                        success = triagePayload.Success,
+                        state = triagePayload.State,
+                        workflow_state = triagePayload.WorkflowState,
+                        target = triagePayload.Target,
+                        affected_count = triagePayload.AffectedCount,
+                        modified_finding_ids = triagePayload.ModifiedFindingIds,
+                        ledger_entries_written = ledgerItems.Count,
+                        sync_status = "pending"
+                    }
+                };
+
+                var aiMeta = new JsonObject
+                {
+                    ["pause"] = true,
+                    ["next_step"] = "sarif_get"
+                };
+
+                return CreateDualPurposeResult(
+                    markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count),
+                    systemStateContext: reviewStateContext,
+                    resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
+                    additionalMeta: aiMeta);
+            }
 
             return CreateDualPurposeResult(
                 markdown: BuildScopedTriageMarkdown(triagePayload),
@@ -426,7 +439,7 @@ namespace Sarifintown.AgentEngine
         }
 
         /// <summary>
-        /// Builds ledger entries from a completed triage payload. Shared by SarifReview and SarifUpdate.
+        /// Builds ledger entries from a completed triage payload. Shared by SarifUpdate AI and human paths.
         /// </summary>
         private static async Task<List<(string CompositeKey, LedgerEntry Entry)>> BuildLedgerItemsAsync(
             ScopedTriagePayload triagePayload,
@@ -435,8 +448,8 @@ namespace Sarifintown.AgentEngine
             string author,
             bool humanReviewed,
             string llmReasoning,
-            string inputMarkdown,
-            DateTime timestamp)
+            DateTime timestamp,
+            string? systemPromptUsed)
         {
             var ledgerItems = new List<(string CompositeKey, LedgerEntry Entry)>();
 
@@ -474,9 +487,9 @@ namespace Sarifintown.AgentEngine
                     },
                     AuditLog = new LedgerAuditLog
                     {
-                        InputMarkdown = inputMarkdown,
                         LlmReasoning = llmReasoning,
-                        HumanReviewed = humanReviewed
+                        HumanReviewed = humanReviewed,
+                        SystemPromptUsed = humanReviewed ? null : systemPromptUsed
                     },
                     UpstreamSync = new LedgerUpstreamSync
                     {
@@ -766,7 +779,7 @@ namespace Sarifintown.AgentEngine
             });
         }
 
-        private static async Task<ScopedGetPayload> ExecutePureGetAsync(bool includeEvidence, int limit, int page = 0, bool debugPrompt = false, string pageToken = "")
+        private static async Task<ScopedGetPayload> ExecutePureGetAsync(int limit, int page = 0, string pageToken = "")
         {
             if (page < 0)
             {
@@ -831,30 +844,10 @@ namespace Sarifintown.AgentEngine
                 _paginationNextOffset = hasMore ? nextOffset : effectiveOffset;
             }
 
-            IReadOnlyDictionary<string, TriageInspectResult>? evidenceByFindingId = null;
-            if (includeEvidence && executionFindings.Count > 0)
-            {
-                var evidenceTargetIds = executionFindings
-                    .Select(item => item.FindingId)
-                    .Take(MaxEvidenceInspectCount)
-                    .ToList();
-
-                evidenceByFindingId = await workflow.InspectManyAsync(evidenceTargetIds);
-            }
-
-            var promptAssembly = PromptAssembly;
             var findingRows = new List<ScopedFinding>(executionFindings.Count);
             foreach (var finding in executionFindings)
             {
                 var displayId = GetOrCreateDisplayId(finding.FindingId);
-                TriageInspectResult? evidence = null;
-                if (includeEvidence && evidenceByFindingId != null)
-                {
-                    evidenceByFindingId.TryGetValue(finding.FindingId, out evidence);
-                }
-
-                // We skip generating per-finding triage prompt to avoid massive duplication
-                string? triagePrompt = null;
 
                 findingRows.Add(new ScopedFinding(
                     displayId,
@@ -862,22 +855,10 @@ namespace Sarifintown.AgentEngine
                     finding.Severity,
                     finding.State,
                     finding.RuleName,
-                    evidence?.Message ?? finding.RuleName,
+                    finding.RuleName,
                     new ScopedLocation(finding.FilePath, finding.LineNumber),
-                    evidence,
-                    triagePrompt));
-            }
-
-            string? batchedTriagePrompt = null;
-            if (promptAssembly != null && executionFindings.Count > 0)
-            {
-                var inputFindings = findingRows.Select(f => (f.Evidence?.RuleId ?? f.Rule, f.Evidence?.Message ?? f.Message!));
-                batchedTriagePrompt = await promptAssembly.BuildBatchTriagePromptAsync(inputFindings).ConfigureAwait(false);
-                // Attach the batched prompt to the first finding only, to transport it to the markdown builder
-                if (findingRows.Count > 0)
-                {
-                    findingRows[0] = findingRows[0] with { TriagePrompt = batchedTriagePrompt };
-                }
+                    null,
+                    null));
             }
 
             var metrics = new SarifGetMetrics(
@@ -929,7 +910,6 @@ namespace Sarifintown.AgentEngine
                     snippetPreloadStatus,
                     pagination),
                 findingRows,
-                debugPrompt,
                 availableFacets);
         }
 
@@ -1591,69 +1571,14 @@ namespace Sarifintown.AgentEngine
         private static string BuildScopedGetMarkdown(ScopedGetPayload payload)
         {
             ArgumentNullException.ThrowIfNull(payload);
-            var metrics = payload.Context.Metrics;
             var findings = payload.Findings;
-            var currentPage = payload.Context.Pagination.PageNumber;
-            var totalPages = payload.Context.Pagination.TotalPages;
-            var nextPage = payload.Context.Pagination.NextPageNumber ?? currentPage;
+            var pagination = payload.Context.Pagination;
 
             var lines = new List<string>
             {
-                "## SARIF Scoped Query",
+                "## SARIF Findings Index",
                 string.Empty
             };
-
-            // Display active filters
-            var activeScope = payload.Context.ActiveScope;
-            if (activeScope.Count > 0)
-            {
-                lines.Add("### Active Filters");
-                foreach (var kvp in activeScope)
-                {
-                    lines.Add($"- **{kvp.Key}**: `{EscapeMarkdown(kvp.Value)}`");
-                }
-
-                lines.Add(string.Empty);
-            }
-            else
-            {
-                lines.Add("### Active Filters");
-                lines.Add("- *(none — showing all findings)*");
-                lines.Add(string.Empty);
-            }
-
-            lines.Add($"- Total in scope: **{metrics.TotalInScope}**");
-            lines.Add($"- Returned in batch: **{metrics.ReturnedInBatch}**");
-            lines.Add($"- Remaining in scope: **{metrics.RemainingInScope}**");
-            lines.Add($"- Snippet preload status: **{payload.Context.SnippetPreloadStatus}**");
-            lines.Add($"- Page: **{currentPage} of {totalPages}**");
-            lines.Add($"- Page size: **{payload.Context.Pagination.PageSize}**");
-            lines.Add($"- Has more: **{payload.Context.Pagination.HasMore}**");
-            lines.Add(string.Empty);
-
-            // Display top noisy directories
-            if (payload.AvailableFacets?.TopLeafDirectories is { Length: > 0 } dirs)
-            {
-                lines.Add("### Top Directories");
-                foreach (var dir in dirs)
-                {
-                    lines.Add($"- `{EscapeMarkdown(dir)}`");
-                }
-
-                lines.Add(string.Empty);
-            }
-
-            if (payload.Context.Pagination.HasMore)
-            {
-                lines.Add($"- Next page: **{nextPage} of {totalPages}**");
-                lines.Add(string.Empty);
-            }
-
-            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
-            {
-                lines.Add($"- Previous page: **{payload.Context.Pagination.PreviousPageNumber.Value} of {totalPages}**");
-                lines.Add(string.Empty);
-            }
 
             if (findings.Count == 0)
             {
@@ -1661,61 +1586,24 @@ namespace Sarifintown.AgentEngine
             }
             else
             {
-                lines.Add("| Id | Severity | State | Rule | Location |\n|---|---|---|---|---|");
+                lines.Add("| Id | Rule | Severity | File Path |\n|---|---|---|---|");
                 foreach (var finding in findings)
                 {
-                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
+                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.Location.File)}` |");
                 }
 
             }
 
             lines.Add(string.Empty);
-            lines.Add("**STOP:** Wait for explicit user instruction.");
-            lines.Add("If the user asks to review/triage findings, call `sarif_review` with the target displayid. You must analyze the evidence above and provide your state, reason, and llmReasoning.");
-            lines.Add("If the user wants to manually override a decision, call `sarif_update` with state, reason, and target.");
-            lines.Add("To change filters, call `sarif_filter`.");
-            if (payload.Context.Pagination.HasMore)
+            lines.Add("To triage a finding, call `sarif_review` with the target displayid to load code evidence and organizational rules.");
+            if (pagination.HasMore)
             {
-                lines.Add($"Optional fetch: if the user explicitly asks for more findings, call `sarif_get` once with `page: {nextPage}` or with `context.pagination.next_page_token`.");
-                lines.Add("Do not auto-fetch another batch; wait for the user instruction.");
+                lines.Add($"More findings are available. Use `page` `{pagination.NextPageNumber}` or `context.pagination.next_page_token` to fetch the next batch.");
             }
 
-            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
+            if (pagination.PreviousPageNumber.HasValue)
             {
-                lines.Add($"To go back, call `sarif_get` once with `page: {payload.Context.Pagination.PreviousPageNumber.Value}`.");
-            }
-
-            var consolidatedPrompt = findings.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.TriagePrompt))?.TriagePrompt;
-            if (!string.IsNullOrWhiteSpace(consolidatedPrompt))
-            {
-                lines.Add(string.Empty);
-                lines.Add("---");
-
-                if (payload.DebugPrompt)
-                {
-                    lines.Add("### DEBUG: Assembled Triage Prompt");
-                    lines.Add(string.Empty);
-                    lines.Add("<details><summary>Batched Triage System Prompt</summary>");
-                    lines.Add(string.Empty);
-                    lines.Add("```markdown");
-                    lines.Add(consolidatedPrompt);
-                    lines.Add("```");
-                    lines.Add(string.Empty);
-                    lines.Add("</details>");
-                    lines.Add(string.Empty);
-                }
-                else
-                {
-                    lines.Add("### Triage Analysis Instructions");
-                    lines.Add("Follow these instructions when analyzing the findings above for review.");
-                    lines.Add(string.Empty);
-                    lines.Add("<details><summary>View Execution Directives</summary>");
-                    lines.Add(string.Empty);
-                    lines.Add(consolidatedPrompt);
-                    lines.Add(string.Empty);
-                    lines.Add("</details>");
-                    lines.Add(string.Empty);
-                }
+                lines.Add($"To fetch the previous batch, use `page` `{pagination.PreviousPageNumber.Value}`.");
             }
 
             return string.Join(Environment.NewLine, lines);
@@ -1810,45 +1698,165 @@ namespace Sarifintown.AgentEngine
         }
 
         /// <summary>
-        /// Builds debug prompt entries for reviewed findings when debug prompt mode is enabled.
+        /// Builds the evidence markdown + embedded system directive + call-to-action for sarif_review responses.
         /// </summary>
-        private static async Task<string?> BuildReviewDebugPromptsAsync(
-            ScopedTriagePayload triagePayload)
+        private static string BuildReviewContextMarkdown(
+            string target,
+            IReadOnlyDictionary<string, TriageInspectResult> evidenceByFindingId,
+            string? systemDirective)
         {
-            bool debugEnabled;
-            lock (SyncRoot)
+            ArgumentNullException.ThrowIfNull(evidenceByFindingId);
+
+            var lines = new List<string>
             {
-                debugEnabled = _debugPromptEnabled;
+                "## Evidence for Review",
+                string.Empty,
+                $"Target: `{EscapeMarkdown(target)}`",
+                string.Empty
+            };
+
+            foreach (var (findingId, evidence) in evidenceByFindingId)
+            {
+                string displayId;
+                lock (SyncRoot)
+                {
+                    displayId = FindingIdToDisplayId.TryGetValue(findingId, out var did) ? did : findingId;
+                }
+
+                lines.Add($"### Finding `{EscapeMarkdown(displayId)}`");
+                lines.Add(string.Empty);
+                lines.Add($"- Rule: `{EscapeMarkdown(evidence.RuleId)}`");
+                lines.Add($"- Severity: `{EscapeMarkdown(evidence.Severity)}`");
+                lines.Add($"- State: `{EscapeMarkdown(evidence.State)}`");
+                lines.Add($"- Message: {EscapeMarkdown(evidence.Message)}");
+
+                if (!string.IsNullOrWhiteSpace(evidence.RuleDescription))
+                {
+                    lines.Add(string.Empty);
+                    lines.Add($"**Rule Description:** {EscapeMarkdown(evidence.RuleDescription)}");
+                }
+
+                lines.Add(string.Empty);
+                lines.Add("#### Data Flow");
+                if (evidence.DataFlowEvidenceBlocks.Count > 0)
+                {
+                    foreach (var block in evidence.DataFlowEvidenceBlocks)
+                    {
+                        lines.Add($"**Steps `{block.StartStepIndex}`-`{block.EndStepIndex}`** at `{EscapeMarkdown(block.FilePath)}`:{block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}");
+                        lines.Add("```csharp");
+                        lines.Add(block.CodeSnippet);
+                        lines.Add("```");
+                    }
+                }
+                else if (evidence.DataFlowSteps.Count > 0)
+                {
+                    foreach (var step in evidence.DataFlowSteps)
+                    {
+                        lines.Add($"**Step `{step.Index}`** at `{EscapeMarkdown(step.FilePath)}`:{step.StartLine?.ToString() ?? "?"} — {EscapeMarkdown(step.Message)}");
+                        if (!string.IsNullOrWhiteSpace(step.CodeSnippet))
+                        {
+                            lines.Add("```csharp");
+                            lines.Add(step.CodeSnippet);
+                            lines.Add("```");
+                        }
+                    }
+                }
+                else
+                {
+                    lines.Add("- No data flow available for this finding.");
+                }
+
+                lines.Add(string.Empty);
             }
 
-            if (!debugEnabled)
+            if (!string.IsNullOrWhiteSpace(systemDirective))
             {
-                return null;
+                lines.Add("---");
+                lines.Add(string.Empty);
+                lines.Add("<system_directive>");
+                lines.Add(systemDirective);
+                lines.Add("</system_directive>");
+                lines.Add(string.Empty);
             }
 
-            var promptAssembly = PromptAssembly;
-            if (promptAssembly == null)
-            {
-                return null;
-            }
+            lines.Add("---");
+            lines.Add(string.Empty);
+            lines.Add("Analyze the evidence above using the rules in the system directive. Output your chain of thought, then immediately call `sarif_update` to record your final decision.");
 
-            var inputs = triagePayload.Evidence
-                .Where(e => !string.IsNullOrWhiteSpace(e.Evidence?.RuleId) || !string.IsNullOrWhiteSpace(e.Evidence?.Message))
-                .Select(e => (e.Evidence!.RuleId, e.Evidence!.Message))
-                .ToList();
-
-            if (inputs.Count == 0)
-            {
-                return null;
-            }
-
-            return await promptAssembly.BuildBatchTriagePromptAsync(inputs).ConfigureAwait(false);
+            return string.Join(Environment.NewLine, lines);
         }
+
+        /// <summary>
+        /// Builds a CallToolResult for sarif_review responses (no "output verbatim and stop" contract).
+        /// </summary>
+        private static CallToolResult CreateReviewContextResult(
+            string reviewMarkdown,
+            string resourceUri,
+            JsonObject? additionalMeta = null)
+        {
+            var meta = new JsonObject();
+            if (!string.IsNullOrWhiteSpace(resourceUri))
+            {
+                var csp = BuildUiCsp(resourceUri);
+                meta["ui"] = new JsonObject
+                {
+                    ["resourceUri"] = resourceUri,
+                    ["csp"] = csp
+                };
+            }
+
+            if (additionalMeta != null)
+            {
+                foreach (var property in additionalMeta)
+                {
+                    meta[property.Key] = property.Value?.DeepClone();
+                }
+            }
+
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock { Text = reviewMarkdown?.Trim() ?? string.Empty }
+                },
+                Meta = meta
+            };
+        }
+
+        /// <summary>
+        /// Appends a diagnostic entry to the agent execution log for developer observability.
+        /// Errors are silently swallowed so logging never disrupts the main flow.
+        /// </summary>
+        private static async Task AppendToExecutionLogAsync(string actionName, string rawContent)
+        {
+            try
+            {
+                string workspaceRoot;
+                lock (SyncRoot)
+                {
+                    workspaceRoot = _workspaceRoot;
+                }
+
+                var logPath = Path.Combine(workspaceRoot, ".sarif", "agent-execution.log");
+                var logDirectory = Path.GetDirectoryName(logPath)!;
+                if (!Directory.Exists(logDirectory))
+                {
+                    Directory.CreateDirectory(logDirectory);
+                }
+
+                var entry = $"[{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}] ACTION: {actionName}{Environment.NewLine}{rawContent}{Environment.NewLine}---{Environment.NewLine}";
+                await File.AppendAllTextAsync(logPath, entry).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Silently swallow — logging must never crash the main flow
+            }
+        }
+
 
         private static string BuildScopedReviewMarkdown(
             ScopedTriagePayload payload,
-            int ledgerEntriesWritten,
-            string? debugPrompt = null)
+            int ledgerEntriesWritten)
         {
             ArgumentNullException.ThrowIfNull(payload);
 
@@ -1931,22 +1939,6 @@ namespace Sarifintown.AgentEngine
                         lines.Add("- Evidence unavailable for this finding.");
                     }
                 }
-            }
-
-            if (!string.IsNullOrWhiteSpace(debugPrompt))
-            {
-                lines.Add(string.Empty);
-                lines.Add("---");
-                lines.Add("### DEBUG: Assembled Triage Prompt");
-                lines.Add(string.Empty);
-                lines.Add("<details><summary>Batched Triage System Prompt</summary>");
-                lines.Add(string.Empty);
-                lines.Add("```markdown");
-                lines.Add(debugPrompt);
-                lines.Add("```");
-                lines.Add(string.Empty);
-                lines.Add("</details>");
-                lines.Add(string.Empty);
             }
 
             lines.Add(string.Empty);
@@ -2047,7 +2039,7 @@ namespace Sarifintown.AgentEngine
                 Options.Create(new SarifOptions
                 {
                     Strategy = PreloadStrategy.LatestPerTool,
-                    EnableSnippetPreload = false
+                    EnableSnippetPreload = true
                 }),
                 workspaceRoot,
                 discoveredFiles);
@@ -2305,7 +2297,7 @@ namespace Sarifintown.AgentEngine
             TriageInspectResult? Evidence,
             string? TriagePrompt = null);
 
-        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, bool DebugPrompt = false, ScopedAvailableFacets? AvailableFacets = null);
+        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, ScopedAvailableFacets? AvailableFacets = null);
 
         private sealed record ScopedAvailableFacets(
             string[] Rules,

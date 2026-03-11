@@ -15,7 +15,6 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
     private const string CoreDirectiveFileName = "core-directive.md";
     private const string OutputFormatFileName = "output-format.md";
     private const string SastCategoryFileName = "sast.md";
-    private const string SastLegacyCategoryFileName = "sast"; // Not strictly needed, we can just use "sast.md"
     private const string SecretCategoryFileName = "secret.md";
     private const string ScaCategoryFileName = "sca.md";
 
