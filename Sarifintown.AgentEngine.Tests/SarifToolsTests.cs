@@ -602,39 +602,6 @@ namespace Sarifintown.AgentEngine.Tests
             Assert.That(payload.GetProperty("bridge").GetProperty("channel").GetString(), Is.EqualTo("sarifintown.mcp.v1"));
         }
 
-        [Test]
-        public void GenerateAnalysisReport_WithValidData_CreatesMarkdownFile()
-        {
-            var resultId = "0";
-            var extractedFlowData = @"{
-                ""rule_id"": ""RULE001"",
-                ""flow_steps"": [
-                    {
-                        ""file_path"": ""test.cs"",
-                        ""start_line"": 10,
-                        ""message"": ""Step 1"",
-                        ""code_snippet"": ""var x = 1;""
-                    }
-                ]
-            }";
-            var outputPath = Path.GetTempFileName();
-
-            try
-            {
-                var result = SarifTools.GenerateAnalysisReport(resultId, extractedFlowData, outputPath);
-
-                Assert.That(result, Contains.Substring("Report generated successfully"));
-                var fileContent = File.ReadAllText(outputPath);
-                Assert.That(fileContent, Contains.Substring("# Vulnerability Analysis Report"));
-                Assert.That(fileContent, Contains.Substring("**Rule ID:** RULE001"));
-                Assert.That(fileContent, Contains.Substring("test.cs (Line 10)"));
-                Assert.That(fileContent, Contains.Substring("var x = 1;"));
-            }
-            finally
-            {
-                File.Delete(outputPath);
-            }
-        }
 
         [Test]
         public void McpToolExposure_ContainsStatefulTools()

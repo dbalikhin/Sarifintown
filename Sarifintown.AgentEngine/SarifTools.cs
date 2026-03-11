@@ -1147,49 +1147,6 @@ namespace Sarifintown.AgentEngine
             };
         }
 
-        private static ActiveScopeFilter ParseScopeFilter(string filter)
-        {
-            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var token in SplitFilterTokens(filter))
-            {
-                var separatorIndex = token.IndexOf(':');
-                if (separatorIndex <= 0 || separatorIndex == token.Length - 1)
-                {
-                    continue;
-                }
-
-                var key = token[..separatorIndex].Trim();
-                var value = token[(separatorIndex + 1)..].Trim().Trim('"', '\'');
-
-                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
-                {
-                    map[key] = value;
-                }
-            }
-
-            map.TryGetValue("severity", out var severity);
-            map.TryGetValue("rule", out var rule);
-
-            if (string.IsNullOrWhiteSpace(rule) && map.TryGetValue("ruleId", out var ruleId))
-            {
-                rule = ruleId;
-            }
-
-            map.TryGetValue("file", out var file);
-            if (string.IsNullOrWhiteSpace(file) && map.TryGetValue("path", out var path))
-            {
-                file = path;
-            }
-
-            map.TryGetValue("state", out var state);
-            if (string.IsNullOrWhiteSpace(state) && map.TryGetValue("status", out var status))
-            {
-                state = status;
-            }
-
-            return new ActiveScopeFilter(severity ?? string.Empty, rule ?? string.Empty, file ?? string.Empty, state ?? string.Empty);
-        }
-
         private static ActiveScopeFilter ParseSpaceSeparatedQuery(string query)
         {
             if (string.IsNullOrWhiteSpace(query))
@@ -1265,50 +1222,6 @@ namespace Sarifintown.AgentEngine
                     map[key] = value;
                 }
             }
-        }
-
-        private static IReadOnlyList<string> SplitFilterTokens(string filter)
-        {
-            if (string.IsNullOrWhiteSpace(filter))
-            {
-                return Array.Empty<string>();
-            }
-
-            var result = new List<string>();
-            var buffer = new System.Text.StringBuilder();
-            var inQuotes = false;
-
-            foreach (var ch in filter)
-            {
-                if (ch == '"')
-                {
-                    inQuotes = !inQuotes;
-                    buffer.Append(ch);
-                    continue;
-                }
-
-                if (ch == ',' && !inQuotes)
-                {
-                    var value = buffer.ToString().Trim();
-                    if (!string.IsNullOrWhiteSpace(value))
-                    {
-                        result.Add(value);
-                    }
-
-                    buffer.Clear();
-                    continue;
-                }
-
-                buffer.Append(ch);
-            }
-
-            var trailing = buffer.ToString().Trim();
-            if (!string.IsNullOrWhiteSpace(trailing))
-            {
-                result.Add(trailing);
-            }
-
-            return result;
         }
 
         private static ActiveScopeFilter GetActiveScope()
@@ -1504,13 +1417,6 @@ namespace Sarifintown.AgentEngine
                 scope.State.Trim()).ToLowerInvariant();
         }
 
-        private static string GetWorkspaceRoot()
-        {
-            lock (SyncRoot)
-            {
-                return _workspaceRoot;
-            }
-        }
 
         private static CallToolResult CreateDualPurposeResult(
             string markdown,
@@ -1885,7 +1791,7 @@ namespace Sarifintown.AgentEngine
 
             lines.Add("---");
             lines.Add(string.Empty);
-            lines.Add("Analyze the evidence above using the rules in the system directive. Output your chain of thought, then immediately call `sarif_update` to record your final decision.");
+            lines.Add("Analyze the evidence above using the rules in the system directive. Output your chain of thought, and your final decision.");
 
             return string.Join(Environment.NewLine, lines);
         }
@@ -2448,63 +2354,6 @@ namespace Sarifintown.AgentEngine
             string DisplayId,
             TriageInspectResult? Evidence);
 
-        [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
-        public static string GenerateAnalysisReport(
-            [Description("Result identifier for report metadata.")]
-            string resultId,
-            [Description("Extracted flow JSON payload returned by ExtractCodeFlow.")]
-            string extractedFlowData,
-            [Description("Destination markdown file path.")]
-            string outputPath)
-        {
-            try
-            {
-                var flowData = JsonSerializer.Deserialize<JsonElement>(extractedFlowData);
-                string ruleId = flowData.TryGetProperty("rule_id", out var ruleElement) ? ruleElement.GetString() ?? "Unknown_Rule" : "Unknown_Rule";
-
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"# Vulnerability Analysis Report");
-                sb.AppendLine($"**Rule ID:** {ruleId}");
-                sb.AppendLine($"**Result Index:** {resultId}");
-                sb.AppendLine($"**Date Generated:** {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
-                sb.AppendLine("\n## Data Flow Context\n");
-
-                if (flowData.TryGetProperty("flow_steps", out var stepsElement) && stepsElement.ValueKind == JsonValueKind.Array)
-                {
-                    int stepNum = 1;
-                    foreach (var step in stepsElement.EnumerateArray())
-                    {
-                        string file = step.GetProperty("file_path").GetString() ?? "unknown_file";
-                        int line = step.TryGetProperty("start_line", out var lineElem) ? lineElem.GetInt32() : 0;
-                        string snippet = step.GetProperty("code_snippet").GetString() ?? "";
-                        string msg = step.TryGetProperty("message", out var msgElement) ? msgElement.GetString() ?? "" : "";
-
-                        sb.AppendLine($"### Step {stepNum}: {file} (Line {line})");
-                        if (!string.IsNullOrEmpty(msg)) sb.AppendLine($"*Context:* {msg}\n");
-                        sb.AppendLine("```csharp");
-                        sb.AppendLine(snippet);
-                        sb.AppendLine("```\n");
-                        stepNum++;
-                    }
-                }
-                else
-                {
-                    sb.AppendLine("*No valid data flow steps extracted.*");
-                }
-
-                File.WriteAllText(outputPath, sb.ToString());
-
-                return JsonSerializer.Serialize(new
-                {
-                    success = true,
-                    message = "Report generated successfully.",
-                    file_path = Path.GetFullPath(outputPath)
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonSerializer.Serialize(new { error = $"Failed to generate report: {ex.Message}" });
-            }
-        }
+        
     }
 }
