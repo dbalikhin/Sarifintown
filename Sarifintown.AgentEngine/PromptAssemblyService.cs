@@ -14,18 +14,25 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
 
     private const string CoreDirectiveFileName = "core-directive.md";
     private const string OutputFormatFileName = "output-format.md";
-    private const string SqlCategoryFileName = "sast-sqli.md";
-    private const string XssCategoryFileName = "sast-xss.md";
-    private const string SecretCategoryFileName = "secret-exposure.md";
-    private const string DefaultCategoryFileName = "default-sast.md";
+    private const string SastCategoryFileName = "sast.md";
+    private const string SastLegacyCategoryFileName = "sast"; // Not strictly needed, we can just use "sast.md"
+    private const string SecretCategoryFileName = "secret.md";
+    private const string ScaCategoryFileName = "sca.md";
 
     private readonly string _promptRootDirectory;
     private readonly PromptTemplateStyle _templateStyle;
+    private readonly bool _enableSastModule;
+    private readonly bool _enableSecretModule;
+    private readonly bool _enableScaModule;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _fileCache = new(StringComparer.OrdinalIgnoreCase);
 
     public PromptAssemblyService(string? rootDirectoryPath = null)
     {
         _promptRootDirectory = ResolveRootDirectory(rootDirectoryPath);
         _templateStyle = PromptTemplateStyle.Structured;
+        _enableSastModule = true;
+        _enableSecretModule = true;
+        _enableScaModule = true;
     }
 
     public PromptAssemblyService(IOptions<PromptAssemblyOptions> options)
@@ -33,6 +40,9 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         ArgumentNullException.ThrowIfNull(options);
         _promptRootDirectory = ResolveRootDirectory(options.Value.RootDirectoryPath);
         _templateStyle = options.Value.TemplateStyle;
+        _enableSastModule = options.Value.EnableSastModule;
+        _enableSecretModule = options.Value.EnableSecretModule;
+        _enableScaModule = options.Value.EnableScaModule;
     }
 
     /// <summary>
@@ -46,18 +56,29 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         var resolvedMessage = message?.Trim() ?? string.Empty;
 
         var coreDirectivePath = Path.Combine(_promptRootDirectory, BaseDirectoryName, CoreDirectiveFileName);
-        var categoryModulePath = Path.Combine(
-            _promptRootDirectory,
-            CategoriesDirectoryName,
-            DetermineCategoryModule(resolvedRuleId, resolvedMessage));
         var outputFormatPath = Path.Combine(_promptRootDirectory, BaseDirectoryName, OutputFormatFileName);
 
         var sections = new List<string>
         {
-            await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false),
-            await ReadModuleOrMissingCommentAsync(categoryModulePath, cancellationToken).ConfigureAwait(false),
-            BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle)
+            await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false)
         };
+
+        if (_enableSastModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableSecretModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SecretCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableScaModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, ScaCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        sections.Add(BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle));
 
         var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(overrideSection))
@@ -65,6 +86,50 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
             sections.Add(overrideSection);
         }
 
+        sections.Add(await ReadModuleOrMissingCommentAsync(outputFormatPath, cancellationToken).ConfigureAwait(false));
+
+        return string.Join(Environment.NewLine, sections.Where(section => !string.IsNullOrWhiteSpace(section)));
+    }
+
+    /// <summary>
+    /// Builds an aggregated LLM system prompt for multiple findings in a single string, avoiding duplication of global directives.
+    /// </summary>
+    public async Task<string> BuildBatchTriagePromptAsync(IEnumerable<(string RuleId, string Message)> findings, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var sections = new List<string>();
+
+        var coreDirectivePath = Path.Combine(_promptRootDirectory, BaseDirectoryName, CoreDirectiveFileName);
+        sections.Add(await ReadModuleOrMissingCommentAsync(coreDirectivePath, cancellationToken).ConfigureAwait(false));
+
+        if (_enableSastModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableSecretModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SecretCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        if (_enableScaModule)
+        {
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, ScaCategoryFileName), cancellationToken).ConfigureAwait(false));
+        }
+
+        foreach (var finding in findings.DistinctBy(f => $"{f.RuleId?.Trim() ?? string.Empty}:{f.Message?.Trim() ?? string.Empty}"))
+        {
+            sections.Add(BuildFindingContextSection(finding.RuleId, finding.Message, _templateStyle));
+        }
+
+        var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(overrideSection))
+        {
+            sections.Add(overrideSection);
+        }
+
+        var outputFormatPath = Path.Combine(_promptRootDirectory, BaseDirectoryName, OutputFormatFileName);
         sections.Add(await ReadModuleOrMissingCommentAsync(outputFormatPath, cancellationToken).ConfigureAwait(false));
 
         return string.Join(Environment.NewLine, sections.Where(section => !string.IsNullOrWhiteSpace(section)));
@@ -130,7 +195,7 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
 {{MESSAGE}}
 
 #### Vulnerability Report Template
-Keep `[Metadata]` and `[Description]` consistent across all extraction strategies. Change only `[Data Flow Evidence]` rendering.
+Keep `[Metadata]` and `[Description]` consistent across all extraction strategies.
 
 ```markdown
 # Vulnerability Report
@@ -158,12 +223,6 @@ Keep `[Metadata]` and `[Description]` consistent across all extraction strategie
 <sink snippet>
 ```
 ```
-
-#### Data Flow Rendering Rules
-- Option 2.1 (`line ±3 strict separation`): output one step header plus one code block per step.
-- Option 2.2 (`line ±3 concatenated blocks`): group by `file_path`, sort by `line_number`, and if adjacent steps differ by <= 6 lines emit sequential step headers followed by one shared code block.
-- Option 2.3 (`tree-sitter method extraction`): if steps resolve to the same method node, emit sequential step headers followed by one shared full-method code block.
-- Use `Source`, `Propagator`, and `Sink` labels in each step header.
 """;
 
     private const string CompactFindingContextTemplate = """
@@ -176,11 +235,6 @@ Keep `[Metadata]` and `[Description]` consistent across all extraction strategie
 
 #### Vulnerability Report Template (Compact)
 Use sections in this order: `[Metadata]`, `[Description]`, `[Data Flow Evidence]`.
-
-#### Data Flow Rendering Rules
-- Option 2.1: one code block per step (`line ±3`).
-- Option 2.2: same file + line distance <= 6 => one shared code block.
-- Option 2.3: same tree-sitter method => one shared full-method code block.
 """;
 
     private const string VerboseFindingContextTemplate = """
@@ -195,60 +249,41 @@ Use sections in this order: `[Metadata]`, `[Description]`, `[Data Flow Evidence]
 Always render `# Vulnerability Report`.
 Always keep `### [Metadata]` and `### [Description]` unchanged across extraction modes.
 Only alter `### [Data Flow Evidence]` according to the selected extraction strategy.
-
-#### Data Flow Rendering Rules
-1. Group steps by `file_path`.
-2. Sort steps by `line_number`.
-3. Option 2.1 (`line ±3 strict separation`): emit one step header + one code block for each step.
-4. Option 2.2 (`line ±3 concatenated blocks`): if `Step[N+1].Line_Number - Step[N].Line_Number <= 6`, emit sequential step headers then one code block.
-5. Option 2.3 (`tree-sitter method extraction`): if steps are inside the same method AST node, emit sequential step headers then one shared method block.
-6. Use labels `Source`, `Propagator`, `Sink` for each step header.
 """;
-
-    private static string DetermineCategoryModule(string ruleId, string message)
-    {
-        var normalized = NormalizeForMatching($"{ruleId} {message}");
-
-        if (normalized.Contains("sqli", StringComparison.Ordinal) || normalized.Contains("sql", StringComparison.Ordinal))
-        {
-            return SqlCategoryFileName;
-        }
-
-        if (normalized.Contains("xss", StringComparison.Ordinal) || normalized.Contains("crosssitescripting", StringComparison.Ordinal))
-        {
-            return XssCategoryFileName;
-        }
-
-        if (normalized.Contains("secret", StringComparison.Ordinal)
-            || normalized.Contains("token", StringComparison.Ordinal)
-            || normalized.Contains("key", StringComparison.Ordinal))
-        {
-            return SecretCategoryFileName;
-        }
-
-        return DefaultCategoryFileName;
-    }
 
     private async Task<string> ReadModuleOrMissingCommentAsync(string modulePath, CancellationToken cancellationToken)
     {
+        if (_fileCache.TryGetValue(modulePath, out var cachedContent))
+        {
+            return cachedContent;
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
 
         if (!File.Exists(modulePath))
         {
-            return CreateMissingFileComment(modulePath);
+            var missing = CreateMissingFileComment(modulePath);
+            _fileCache[modulePath] = missing;
+            return missing;
         }
 
         try
         {
-            return await File.ReadAllTextAsync(modulePath, cancellationToken).ConfigureAwait(false);
+            var content = await File.ReadAllTextAsync(modulePath, cancellationToken).ConfigureAwait(false);
+            _fileCache[modulePath] = content;
+            return content;
         }
         catch (IOException)
         {
-            return CreateMissingFileComment(modulePath);
+            var missing = CreateMissingFileComment(modulePath);
+            _fileCache[modulePath] = missing;
+            return missing;
         }
         catch (UnauthorizedAccessException)
         {
-            return CreateMissingFileComment(modulePath);
+            var missing = CreateMissingFileComment(modulePath);
+            _fileCache[modulePath] = missing;
+            return missing;
         }
     }
 
@@ -288,16 +323,5 @@ Only alter `### [Data Flow Evidence]` according to the selected extraction strat
     {
         var relativePath = Path.GetRelativePath(_promptRootDirectory, path).Replace('\\', '/');
         return $"<!-- missing-prompt-module: {relativePath} -->";
-    }
-
-    private static string NormalizeForMatching(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-        {
-            return string.Empty;
-        }
-
-        var lowered = input.ToLowerInvariant();
-        return Regex.Replace(lowered, "[^a-z0-9]", string.Empty, RegexOptions.CultureInvariant);
     }
 }

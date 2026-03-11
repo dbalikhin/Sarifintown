@@ -314,9 +314,14 @@ Use the same server body for both schema styles:
 
 You can tune SARIF preload behavior and startup snippet warmup directly from MCP client env vars:
 
-- `SARIFINTOWN_Preload__Strategy`: `None`, `LatestPerTool`, or `All`
-- `SARIFINTOWN_Preload__EnableSnippetPreload`: `true`/`false`
-- `SARIFINTOWN_Preload__MaxPreloadedSnippets`: integer
+- `SARIFINTOWN_Sarif__Strategy`: `None`, `LatestPerTool`, or `All`
+- `SARIFINTOWN_Sarif__EnableSnippetPreload`: `true`/`false`
+- `SARIFINTOWN_Sarif__EnableDebugPrompt`: `true`/`false` (default `false`)
+- `SARIFINTOWN_Sarif__IncludeEvidenceByDefault`: `true`/`false` (default `true`)
+
+`SARIFINTOWN_Sarif__EnableDebugPrompt` and `SARIFINTOWN_Sarif__IncludeEvidenceByDefault` are evaluated only at MCP server startup. They cannot be changed from MCP prompts or slash-command arguments.
+
+Snippet preload bootstrap is fixed to the first 10 findings during startup. Remaining findings are preloaded in the background.
 
 Example (global tool invocation preserved):
 
@@ -330,9 +335,10 @@ Example (global tool invocation preserved):
       "cwd": "C:/dev/sarifintown",
       "env": {
         "PROJECT_ROOT": "C:/dev/my-app",
-        "SARIFINTOWN_Preload__Strategy": "LatestPerTool",
-        "SARIFINTOWN_Preload__EnableSnippetPreload": "true",
-        "SARIFINTOWN_Preload__MaxPreloadedSnippets": "50"
+        "SARIFINTOWN_Sarif__Strategy": "LatestPerTool",
+        "SARIFINTOWN_Sarif__EnableSnippetPreload": "true",
+        "SARIFINTOWN_Sarif__EnableDebugPrompt": "false",
+        "SARIFINTOWN_Sarif__IncludeEvidenceByDefault": "true"
       }
     }
   }

@@ -13,6 +13,8 @@ internal sealed class SnippetWarmupService : BackgroundService
     private readonly Channel<string> _findingQueue = Channel.CreateUnbounded<string>();
     private readonly HashSet<string> _queuedFindingIds = new(StringComparer.Ordinal);
     private readonly object _queueLock = new();
+    private readonly SemaphoreSlim _preloadLock = new(1, 1);
+    private readonly object _preloadStatusLock = new();
 
     private readonly SarifStateService _stateService;
     private readonly IFileReader _fileReader;
@@ -20,6 +22,9 @@ internal sealed class SnippetWarmupService : BackgroundService
     private readonly SnippetCacheService _snippetCache;
     private readonly string _workspaceRoot;
     private readonly ILogger<SnippetWarmupService> _logger;
+    private SnippetPreloadState _preloadState = SnippetPreloadState.NotStarted;
+    private string _preloadMessage = "not_started";
+    private TaskCompletionSource<bool> _preloadCompletion = CreatePreloadCompletionSource();
 
     internal SnippetWarmupService(
         SarifStateService stateService,
@@ -46,20 +51,140 @@ internal sealed class SnippetWarmupService : BackgroundService
 
     internal ValueTask QueueFindingsAsync(IEnumerable<string> findingIds, CancellationToken cancellationToken)
     {
-        // Abandoned. Queue logic is bypassed to prevent V8 concurrency deadlocks.
+        // Queue warmup is intentionally disabled to avoid V8 concurrency deadlocks.
         return ValueTask.CompletedTask;
     }
 
     internal Task PreloadSnippetsAsync(int maxFindings, CancellationToken cancellationToken)
     {
-        // Abandoned. V8 compiles lazily through InitializeAsync instead of looping through files.
-        return Task.CompletedTask;
+        if (maxFindings <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return PreloadCoreAsync(skip: 0, take: maxFindings, cancellationToken);
+    }
+
+    internal Task PreloadRemainingSnippetsAsync(int skipFindings, CancellationToken cancellationToken)
+    {
+        var safeSkip = Math.Max(0, skipFindings);
+        return PreloadCoreAsync(skip: safeSkip, take: int.MaxValue, cancellationToken);
+    }
+
+    internal SnippetPreloadStatusSnapshot GetPreloadStatus()
+    {
+        lock (_preloadStatusLock)
+        {
+            return new SnippetPreloadStatusSnapshot(_preloadState, _preloadMessage);
+        }
+    }
+
+    internal async Task<SnippetPreloadStatusSnapshot> WaitForPreloadAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(timeout.Ticks);
+
+        var snapshot = GetPreloadStatus();
+        if (snapshot.State != SnippetPreloadState.InProgress)
+        {
+            return snapshot;
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
+
+        try
+        {
+            await _preloadCompletion.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // timeout reached; caller can continue with fallback behavior
+        }
+
+        return GetPreloadStatus();
     }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Background thread warmup logic is removed to prevent V8 concurrency deadlocks.
+        // Background queue warmup remains disabled to avoid V8 concurrency deadlocks.
         return Task.CompletedTask;
+    }
+
+    private async Task PreloadCoreAsync(int skip, int take, CancellationToken cancellationToken)
+    {
+        await _preloadLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            SetPreloadStatus(SnippetPreloadState.InProgress, "in_progress");
+            _preloadCompletion = CreatePreloadCompletionSource();
+
+            var findings = await _stateService.GetFindingsAsync(cancellationToken).ConfigureAwait(false);
+            var targets = findings
+                .OrderByDescending(item => item.PriorityScore)
+                .ThenBy(item => item.FindingId, StringComparer.Ordinal)
+                .Skip(skip)
+                .Take(take)
+                .ToList();
+
+            var failures = 0;
+            foreach (var finding in targets)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    await WarmFindingAsync(finding, cancellationToken).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    failures++;
+                    _logger.LogWarning(exception, "Snippet preload skipped finding {FindingId}: invalid operation.", finding.FindingId);
+                }
+                catch (IOException exception)
+                {
+                    failures++;
+                    _logger.LogWarning(exception, "Snippet preload skipped finding {FindingId}: I/O error.", finding.FindingId);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    failures++;
+                    _logger.LogWarning(exception, "Snippet preload skipped finding {FindingId}: access denied.", finding.FindingId);
+                }
+            }
+
+            if (failures > 0)
+            {
+                SetPreloadStatus(SnippetPreloadState.Failed, "failed");
+                _preloadCompletion.TrySetResult(false);
+                return;
+            }
+
+            SetPreloadStatus(SnippetPreloadState.Completed, "completed");
+            _preloadCompletion.TrySetResult(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            SetPreloadStatus(SnippetPreloadState.Failed, "canceled");
+            _preloadCompletion.TrySetCanceled(cancellationToken);
+            throw;
+        }
+        finally
+        {
+            _preloadLock.Release();
+        }
+    }
+
+    private void SetPreloadStatus(SnippetPreloadState state, string message)
+    {
+        lock (_preloadStatusLock)
+        {
+            _preloadState = state;
+            _preloadMessage = message;
+        }
+    }
+
+    private static TaskCompletionSource<bool> CreatePreloadCompletionSource()
+    {
+        return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private async Task WarmFindingAsync(string findingId, CancellationToken cancellationToken)
@@ -70,7 +195,6 @@ internal sealed class SnippetWarmupService : BackgroundService
         {
             return;
         }
-
         await WarmFindingAsync(finding, cancellationToken).ConfigureAwait(false);
     }
 
@@ -152,3 +276,13 @@ internal sealed class SnippetWarmupService : BackgroundService
         return SnippetHelper.ExtractLineWindow(sourceCode, windowStartLine, windowEndLine);
     }
 }
+
+internal enum SnippetPreloadState
+{
+    NotStarted = 0,
+    InProgress = 1,
+    Completed = 2,
+    Failed = 3
+}
+
+internal sealed record SnippetPreloadStatusSnapshot(SnippetPreloadState State, string Message);

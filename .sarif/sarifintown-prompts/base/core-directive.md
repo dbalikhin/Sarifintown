@@ -15,6 +15,6 @@ Use the following definitions to assess whether the finding is in a production c
 * **Non-Production Code & Assets:**
     * **Test Code:** Files located in directories like `/tests/`, `/spec/`, `/mocks/` or with names like `test_*.py` or `ExampleUnitTest.java`. Findings here are almost always False Positives.
     * **Documentation & Examples:** Files in `/docs/` or `/examples/` folders, or with extensions like `.md` and `.rst`. Strings in these files are overwhelmingly dummy values or placeholders and should be treated as False Positives.
-    * **Inactive/Unreachable Code:** Code that is commented out or located after a definite return or exit statement.
+    * **Inactive/Unreachable Code:** Code that is commented out or located after a definitive `return`, `exit`, or `throw` statement.
         * For SAST, this is a False Positive (it can't execute).
         * For Secrets, this is a True Positive (the secret is still exposed).

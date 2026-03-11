@@ -145,10 +145,14 @@ namespace Sarifintown.AgentEngine.Tests
                 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
                 SarifTools.SetLocalUiBaseUrl(string.Empty);
 
+                if (!string.IsNullOrWhiteSpace(config.Filter))
+                {
+                    await SarifTools.SarifFilter(config.Filter);
+                }
+
+                SarifTools.SetIncludeEvidenceByDefault(config.IncludeEvidence);
+
                 var result = await SarifTools.SarifGet(
-                    scope: config.Scope,
-                    filter: config.Filter,
-                    includeEvidence: config.IncludeEvidence,
                     limit: config.Limit);
 
                 var text = result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? string.Empty;

@@ -27,6 +27,7 @@ TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
 };
 
 var builder = WebApplication.CreateSlimBuilder(args);
+const int InitialSnippetPreloadCount = 10;
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options =>
 {
@@ -48,21 +49,25 @@ WriteStartupInfo($"Workspace root: '{discovery.WorkspaceRoot}'");
 WriteStartupInfo($"Discovered SARIF files: {discovery.SarifFiles.Count}");
 
 builder.Configuration
-    .AddJsonFile(Path.Combine(discovery.WorkspaceRoot, ".sarif", "engine.json"), optional: true)
+    .AddJsonFile(Path.Combine(discovery.WorkspaceRoot, "mcp.json"), optional: true, reloadOnChange: true)
     .AddEnvironmentVariables(prefix: "SARIFINTOWN_");
 
-builder.Services.Configure<SarifPreloadOptions>(
-    builder.Configuration.GetSection(SarifPreloadOptions.SectionName));
+builder.Services.Configure<SarifOptions>(
+    builder.Configuration.GetSection(SarifOptions.SectionName));
+
+builder.Services.Configure<PromptAssemblyOptions>(
+    builder.Configuration.GetSection(PromptAssemblyOptions.SectionName));
 
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
-builder.Services.AddSingleton<IPromptAssemblyService>(_ => new PromptAssemblyService());
+builder.Services.AddSingleton<IPromptAssemblyService>(serviceProvider => 
+    new PromptAssemblyService(serviceProvider.GetRequiredService<IOptions<PromptAssemblyOptions>>()));
 builder.Services.AddSingleton<SnippetCacheService>();
 builder.Services.AddSingleton<SarifStateService>(serviceProvider =>
     new SarifStateService(
         serviceProvider.GetRequiredService<IFileReader>(),
-        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<SarifPreloadOptions>>(),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<SarifOptions>>(),
         discovery.WorkspaceRoot,
         discovery.SarifFiles));
 builder.Services.AddSingleton<SnippetWarmupService>(serviceProvider =>
@@ -99,7 +104,7 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
-var preloadOptions = app.Services.GetRequiredService<IOptions<SarifPreloadOptions>>().Value;
+var sarifOptions = app.Services.GetRequiredService<IOptions<SarifOptions>>().Value;
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -111,17 +116,26 @@ SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyServi
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
+SarifTools.SetDebugPromptEnabled(sarifOptions.EnableDebugPrompt);
+SarifTools.SetIncludeEvidenceByDefault(sarifOptions.IncludeEvidenceByDefault);
+await RunStartupStageAsync("Available facets initialization", () => SarifTools.InitializeAvailableFacetsAsync());
 WriteStartupInfo("MCP tool dependencies configured.");
 
 await RunStartupStageAsync("Web host start", () => app.StartAsync());
 
-if (preloadOptions.EnableSnippetPreload)
+if (sarifOptions.EnableSnippetPreload)
 {
+    await RunStartupStageAsync(
+        $"Snippet preload bootstrap ({InitialSnippetPreloadCount})",
+        () => snippetWarmupService.PreloadSnippetsAsync(InitialSnippetPreloadCount, app.Lifetime.ApplicationStopping));
+    var bootstrapPreloadStatus = snippetWarmupService.GetPreloadStatus();
+    WriteStartupInfo($"Snippet preload bootstrap status: '{bootstrapPreloadStatus.Message}'");
+
     _ = RunSnippetPreloadInBackgroundAsync(
         snippetWarmupService,
-        preloadOptions.MaxPreloadedSnippets,
+        InitialSnippetPreloadCount,
         app.Lifetime.ApplicationStopping);
-    WriteStartupInfo($"Snippet preload ({preloadOptions.MaxPreloadedSnippets} max): scheduled in background");
+    WriteStartupInfo($"Snippet preload bootstrap ({InitialSnippetPreloadCount}) completed; remaining preload scheduled in background");
 }
 
 static async ValueTask<CompleteResult> HandleCompletionRequestAsync(
@@ -182,15 +196,22 @@ static IReadOnlyList<string> ResolveCompletionValues(
 
     IEnumerable<string> candidates = normalizedPrompt switch
     {
+        "sarif_filter" => normalizedArgument switch
+        {
+            "query" => BuildFilterQueryCompletions(completionData),
+            _ => Array.Empty<string>()
+        },
         "sarif_get" => normalizedArgument switch
         {
-            "scope" => new[] { "keep", "set", "refine", "clear" },
-            "includeEvidence" => new[] { "true", "false" },
-            "debugPrompt" => new[] { "true", "false" },
             "limit" => completionData.Limits,
             _ => Array.Empty<string>()
         },
-        "sarif_triage" => normalizedArgument switch
+        "sarif_review" => normalizedArgument switch
+        {
+            "target" => new[] { "scope" },
+            _ => Array.Empty<string>()
+        },
+        "sarif_update" => normalizedArgument switch
         {
             "state" => completionData.DecisionStates,
             "reason" => completionData.Reasons,
@@ -216,6 +237,28 @@ static IReadOnlyList<string> ApplyPrefixFilter(IEnumerable<string> candidates, s
         .Where(candidate => normalizedPrefix.Length == 0 || candidate.StartsWith(normalizedPrefix, StringComparison.OrdinalIgnoreCase))
         .Take(50)
         .ToArray();
+}
+
+static IReadOnlyList<string> BuildFilterQueryCompletions(PromptCompletionData completionData)
+{
+    var completions = new List<string> { "clear" };
+
+    foreach (var severity in completionData.Severities)
+    {
+        completions.Add($"severity:{severity}");
+    }
+
+    foreach (var rule in completionData.Rules)
+    {
+        completions.Add($"rule:{rule}");
+    }
+
+    foreach (var state in completionData.ListStates)
+    {
+        completions.Add($"status:{state}");
+    }
+
+    return completions;
 }
 
 static CompleteResult CreateCompletionResult(IReadOnlyList<string> values)
@@ -288,7 +331,7 @@ await app.WaitForShutdownAsync();
 
 static async Task RunSnippetPreloadInBackgroundAsync(
     SnippetWarmupService snippetWarmupService,
-    int maxPreloadedSnippets,
+    int alreadyPreloadedFindings,
     CancellationToken cancellationToken)
 {
     ArgumentNullException.ThrowIfNull(snippetWarmupService);
@@ -296,8 +339,10 @@ static async Task RunSnippetPreloadInBackgroundAsync(
     try
     {
         await RunStartupStageAsync(
-            $"Snippet preload ({maxPreloadedSnippets} max)",
-            () => snippetWarmupService.PreloadSnippetsAsync(maxPreloadedSnippets, cancellationToken));
+            "Snippet preload (remaining findings)",
+            () => snippetWarmupService.PreloadRemainingSnippetsAsync(alreadyPreloadedFindings, cancellationToken));
+        var backgroundPreloadStatus = snippetWarmupService.GetPreloadStatus();
+        WriteStartupInfo($"Snippet preload background status: '{backgroundPreloadStatus.Message}'");
     }
     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
     {

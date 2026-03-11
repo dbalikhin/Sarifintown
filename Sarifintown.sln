@@ -44,10 +44,9 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "base", "base", "{1464E160-6
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "categories", "categories", "{370D8DB6-9254-4A68-A81D-9B8521EB3E21}"
 	ProjectSection(SolutionItems) = preProject
-		.sarif\sarifintown-prompts\categories\default-sast.md = .sarif\sarifintown-prompts\categories\default-sast.md
-		.sarif\sarifintown-prompts\categories\sast-sqli.md = .sarif\sarifintown-prompts\categories\sast-sqli.md
-		.sarif\sarifintown-prompts\categories\sast-xss.md = .sarif\sarifintown-prompts\categories\sast-xss.md
-		.sarif\sarifintown-prompts\categories\secret-exposure.md = .sarif\sarifintown-prompts\categories\secret-exposure.md
+		.sarif\sarifintown-prompts\categories\sast.md = .sarif\sarifintown-prompts\categories\sast.md
+		.sarif\sarifintown-prompts\categories\sca.md = .sarif\sarifintown-prompts\categories\sca.md
+		.sarif\sarifintown-prompts\categories\secret.md = .sarif\sarifintown-prompts\categories\secret.md
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "org-overrides", "org-overrides", "{167BC373-7F07-4929-93BC-705849892E64}"

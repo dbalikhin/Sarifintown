@@ -48,7 +48,7 @@ internal static class SpectreCliMenu
             "Triage status" => await RenderStatusAsync(cancellationToken),
             "Triage list" => await RenderListAsync(cancellationToken),
             "Triage decision" => await RenderTriageAsync(cancellationToken),
-            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_triage flow: {action}" }),
+            "Triage inspect" or "Triage bulk" => JsonSerializer.Serialize(new { success = false, message = $"Action migrated to sarif_get/sarif_review flow: {action}" }),
             _ => JsonSerializer.Serialize(new { success = false, message = $"Unsupported action: {action}" })
         };
     }
@@ -56,22 +56,22 @@ internal static class SpectreCliMenu
     private static async Task<string> RenderStatusAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifGet(scope: "keep", filter: string.Empty, includeEvidence: false, limit: 10);
+        var result = await SarifTools.SarifGet(limit: 10);
         return RenderDualPurposeText(result);
     }
 
     private static async Task<string> RenderListAsync(CancellationToken cancellationToken)
     {
-        var scope = AnsiConsole.Prompt(
-            new SelectionPrompt<string>()
-                .Title("Scope action")
-                .AddChoices("keep", "set", "refine", "clear"));
-        var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high, rule:SQLI):", string.Empty);
-        var includeEvidence = AnsiConsole.Confirm("Include evidence?", false);
+        var filter = AnsiConsole.Ask<string>("Filter expression (e.g. severity:high rule:SQLI path:controllers):", string.Empty);
         var limit = AnsiConsole.Ask<int>("Limit:", 10);
 
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifGet(scope, filter, includeEvidence, limit);
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            await SarifTools.SarifFilter(filter);
+        }
+
+        var result = await SarifTools.SarifGet(limit: limit);
         return RenderDualPurposeText(result);
     }
 
@@ -85,7 +85,7 @@ internal static class SpectreCliMenu
         var target = AnsiConsole.Ask<string>("Target (alias like 1/@1/S-01, CSV aliases, raw ID, or scope):", "scope");
 
         cancellationToken.ThrowIfCancellationRequested();
-        var result = await SarifTools.SarifTriage(state, reason, target);
+        var result = await SarifTools.SarifUpdate(state, reason, target);
         return RenderDualPurposeText(result);
     }
 

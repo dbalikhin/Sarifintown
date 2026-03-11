@@ -14,4 +14,8 @@ public sealed class PromptAssemblyOptions
     public string? RootDirectoryPath { get; init; }
 
     public PromptTemplateStyle TemplateStyle { get; init; } = PromptTemplateStyle.Structured;
+
+    public bool EnableSastModule { get; init; } = true;
+    public bool EnableSecretModule { get; init; } = true;
+    public bool EnableScaModule { get; init; } = true;
 }

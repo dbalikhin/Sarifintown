@@ -20,7 +20,7 @@ public sealed class SarifStateService
     private readonly IFileReader _fileReader;
     private readonly string _workspaceRoot;
     private readonly IReadOnlyList<string> _sarifFiles;
-    private readonly SarifPreloadOptions _options;
+    private readonly SarifOptions _options;
 
     private List<TriageFindingEnvelope> _findings = new();
     private TriageStateDocument _triageDocument = new();
@@ -28,7 +28,7 @@ public sealed class SarifStateService
 
     internal SarifStateService(
         IFileReader fileReader,
-        IOptions<SarifPreloadOptions> options,
+        IOptions<SarifOptions> options,
         string workspaceRoot,
         IEnumerable<string> sarifFiles)
     {

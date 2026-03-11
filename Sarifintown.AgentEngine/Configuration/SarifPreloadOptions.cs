@@ -7,13 +7,15 @@ internal enum PreloadStrategy
     All = 2
 }
 
-internal sealed class SarifPreloadOptions
+internal sealed class SarifOptions
 {
-    public const string SectionName = "Preload";
+    public const string SectionName = "Sarif";
 
     public PreloadStrategy Strategy { get; set; } = PreloadStrategy.LatestPerTool;
 
     public bool EnableSnippetPreload { get; set; } = true;
 
-    public int MaxPreloadedSnippets { get; set; } = 50;
+    public bool EnableDebugPrompt { get; set; }
+
+    public bool IncludeEvidenceByDefault { get; set; } = true;
 }

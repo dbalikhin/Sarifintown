@@ -71,28 +71,6 @@ MCP prompt primitives are also exposed:
 
 These commands use loaded SARIF findings and persist decision state to `.sarif/triage.json`.
 
-## Engine preload and warmup configuration
-
-`Sarifintown.Engine` supports preload and snippet warmup tuning via `.sarif/engine.json` and environment variables.
-
-Example `.sarif/engine.json`:
-
-```json
-{
-  "Preload": {
-    "Strategy": "LatestPerTool",
-    "EnableSnippetPreload": true,
-    "MaxPreloadedSnippets": 50
-  }
-}
-```
-
-Equivalent environment variables:
-
-- `SARIFINTOWN_Preload__Strategy` = `None` | `LatestPerTool` | `All`
-- `SARIFINTOWN_Preload__EnableSnippetPreload` = `true` | `false`
-- `SARIFINTOWN_Preload__MaxPreloadedSnippets` = integer
-
 ## License
 
 This project is licensed under the Apache 2.0 License.

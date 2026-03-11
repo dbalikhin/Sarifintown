@@ -85,14 +85,6 @@ internal sealed record TriageBulkResult(
     IReadOnlyList<string> ModifiedFindingIds,
     bool DryRun);
 
-internal enum ScopeAction
-{
-    Keep = 0,
-    Set = 1,
-    Refine = 2,
-    Clear = 3
-}
-
 internal sealed record ActiveScopeFilter(
     string Severity = "",
     string Rule = "",
