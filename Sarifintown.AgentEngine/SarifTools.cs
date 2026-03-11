@@ -38,63 +38,6 @@ namespace Sarifintown.AgentEngine
         private static HashSet<string> _availableSeverities = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableRules = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableStatuses = new(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
-        private static readonly string[] IdeHostTokens =
-        [
-            "vscode",
-            "visualstudiocode",
-            "visualstudio",
-            "cursor",
-            "windsurf",
-            "jetbrains",
-            "rider",
-            "zed",
-            "eclipse",
-            "intellij",
-            "xcode"
-        ];
-
-        private static readonly string[] CliHostTokens =
-        [
-            "claudecode",
-            "claude",
-            "codex",
-            "aider",
-            "geminicli",
-            "opencode",
-            "terminal",
-            "bash",
-            "zsh",
-            "fish",
-            "powershell",
-            "pwsh",
-            "cmd",
-            "windowsterminal",
-            "iterm",
-            "tmux",
-            "kitty",
-            "alacritty"
-        ];
-
-        private static readonly string[] VsCodeFamilyTokens =
-        [
-            "vscode",
-            "visualstudiocode",
-            "cursor",
-            "windsurf"
-        ];
-
-        private static readonly string[] JetBrainsFamilyTokens =
-        [
-            "jetbrains",
-            "rider",
-            "intellij",
-            "pycharm",
-            "webstorm",
-            "clion",
-            "goland",
-            "rubymine"
-        ];
-
         public static void SetDiscoveredSarifFiles(IEnumerable<string> discoveredSarifFiles)
         {
             ArgumentNullException.ThrowIfNull(discoveredSarifFiles);
@@ -272,7 +215,7 @@ namespace Sarifintown.AgentEngine
         /// Context injector: loads deep code evidence and organizational rules for the LLM to analyze.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Retrieves detailed code-flow evidence, execution context, and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Use this to analyze an issue's source code before making a triage decision.")]
+        [Description("Retrieves detailed code-flow evidence, execution context, and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Use this to review/triage/analyze a finding/issue/vulnerability.")]
         public static async Task<CallToolResult> SarifReview(
             [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), or literal 'scope' to review all open findings/issues in active scope (max 25).")]
             string target)
@@ -748,62 +691,11 @@ namespace Sarifintown.AgentEngine
             [Description("When true for CLI mode, starts the Spectre.Console menu immediately.")]
             bool startCliMenu = false)
         {
-            var host = DetectHost(thisServer, hostHint);
-            var mode = ResolveHostMode(host);
-            var hostFamily = ResolveHostFamily(host);
-            var usedFallback = string.Equals(host, "unknown", StringComparison.OrdinalIgnoreCase);
-
-            if (mode == "ide-ui")
-            {
-                return JsonSerializer.Serialize(new
-                {
-                    host,
-                    mode,
-                    host_family = hostFamily,
-                    uri = "ui://sarifintown/mcp/dashboard",
-                    local_http_ui = CreateLocalHttpUiPayload(),
-                    bridge = new
-                    {
-                        transport = "postMessage",
-                        channel = "sarifintown.mcp.v1"
-                    },
-                    fallback = new
-                    {
-                        mode = "cli-tui",
-                        library = "Spectre.Console"
-                    }
-                });
-            }
-
-            string selectedAction = string.Empty;
-            string commandResult = string.Empty;
-            if (startCliMenu)
-            {
-                selectedAction = SpectreCliMenu.Start();
-                if (selectedAction.StartsWith("Triage ", StringComparison.Ordinal))
-                {
-                    commandResult = SpectreCliMenu
-                        .ExecuteTriageActionAsync(selectedAction)
-                        .GetAwaiter()
-                        .GetResult();
-                }
-            }
-
-            return JsonSerializer.Serialize(new
-            {
-                host,
-                mode,
-                host_family = hostFamily,
-                fallback_used = usedFallback,
-                local_http_ui = CreateLocalHttpUiPayload(),
-                tui = new
-                {
-                    library = "Spectre.Console",
-                    action = selectedAction,
-                    action_result = commandResult,
-                    menu = "interactive"
-                }
-            });
+            return InteractiveSurfaceResolver.ResolveInteractiveSurface(
+                thisServer,
+                hostHint,
+                startCliMenu,
+                CreateLocalHttpUiPayload);
         }
 
         private static async Task<ScopedGetPayload> ExecutePureGetAsync(int limit, int page = 0, string pageToken = "")
@@ -2076,172 +1968,6 @@ namespace Sarifintown.AgentEngine
                 workspaceRoot,
                 snippetCache,
                 snippetWarmupService);
-        }
-
-        private static string DetectHost(McpServer thisServer, string hostHint)
-        {
-            if (!string.IsNullOrWhiteSpace(hostHint))
-            {
-                return hostHint.Trim();
-            }
-
-            if (thisServer != null)
-            {
-                var hostFromServer = TryGetHostNameFromServer(thisServer);
-                if (!string.IsNullOrWhiteSpace(hostFromServer))
-                {
-                    return hostFromServer;
-                }
-            }
-
-            var hostFromEnvironment = TryGetHostNameFromEnvironment();
-            if (!string.IsNullOrWhiteSpace(hostFromEnvironment))
-            {
-                return hostFromEnvironment;
-            }
-
-            return "unknown";
-        }
-
-        private static string ResolveHostMode(string host)
-        {
-            if (string.IsNullOrWhiteSpace(host))
-            {
-                return "cli-tui";
-            }
-
-            var normalizedHost = NormalizeHost(host);
-
-            if (ContainsAnyToken(normalizedHost, IdeHostTokens))
-            {
-                return "ide-ui";
-            }
-
-            if (ContainsAnyToken(normalizedHost, CliHostTokens))
-            {
-                return "cli-tui";
-            }
-
-            return "cli-tui";
-        }
-
-        private static string ResolveHostFamily(string host)
-        {
-            if (string.IsNullOrWhiteSpace(host))
-            {
-                return "terminal-family";
-            }
-
-            var normalizedHost = NormalizeHost(host);
-
-            if (ContainsAnyToken(normalizedHost, VsCodeFamilyTokens))
-            {
-                return "vscode-family";
-            }
-
-            if (ContainsAnyToken(normalizedHost, JetBrainsFamilyTokens))
-            {
-                return "jetbrains-family";
-            }
-
-            if (normalizedHost.Contains("visualstudio", StringComparison.Ordinal))
-            {
-                return "visualstudio-family";
-            }
-
-            if (normalizedHost.Contains("zed", StringComparison.Ordinal))
-            {
-                return "zed-family";
-            }
-
-            if (ContainsAnyToken(normalizedHost, CliHostTokens))
-            {
-                return "terminal-family";
-            }
-
-            return "unknown-family";
-        }
-
-        private static string TryGetHostNameFromEnvironment()
-        {
-            var directValueVariables = new[]
-            {
-                "MCP_CLIENT_NAME",
-                "MCP_HOST",
-                "MCP_CLIENT",
-                "TERM_PROGRAM",
-                "TERM",
-                "TERMINAL_EMULATOR",
-                "PROMPT_TOOLKIT_SHELL",
-                "VSCODE_CWD",
-                "ELECTRON_RUN_AS_NODE"
-            };
-
-            foreach (var variable in directValueVariables)
-            {
-                var value = Environment.GetEnvironmentVariable(variable);
-                if (!string.IsNullOrWhiteSpace(value))
-                {
-                    return value.Trim();
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLAUDECODE")))
-            {
-                return "Claude Code";
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CURSOR_TRACE_ID")))
-            {
-                return "Cursor";
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VSCODE_GIT_IPC_HANDLE")))
-            {
-                return "Visual Studio Code";
-            }
-
-            return string.Empty;
-        }
-
-        private static string NormalizeHost(string host)
-        {
-            var lowered = host.Trim().ToLowerInvariant();
-
-            return string.Concat(lowered.Where(char.IsLetterOrDigit));
-        }
-
-        private static bool ContainsAnyToken(string normalizedHost, IEnumerable<string> tokens)
-        {
-            return tokens.Any(token => normalizedHost.Contains(token, StringComparison.Ordinal));
-        }
-
-        private static string TryGetHostNameFromServer(McpServer server)
-        {
-            var directClientInfo = GetPropertyValue(server, "ClientInfo");
-            var directName = GetPropertyValue(directClientInfo, "Name")?.ToString();
-
-            if (!string.IsNullOrWhiteSpace(directName))
-            {
-                return directName.Trim();
-            }
-
-            var initializeRequest = GetPropertyValue(server, "InitializeRequest");
-            var requestClientInfo = GetPropertyValue(initializeRequest, "ClientInfo");
-            var requestClientName = GetPropertyValue(requestClientInfo, "Name")?.ToString();
-
-            if (!string.IsNullOrWhiteSpace(requestClientName))
-            {
-                return requestClientName.Trim();
-            }
-
-            var session = GetPropertyValue(server, "Session");
-            var sessionClientInfo = GetPropertyValue(session, "ClientInfo");
-            var sessionClientName = GetPropertyValue(sessionClientInfo, "Name")?.ToString();
-
-            return string.IsNullOrWhiteSpace(sessionClientName)
-                ? string.Empty
-                : sessionClientName.Trim();
         }
 
         private static object CreateLocalHttpUiPayload()

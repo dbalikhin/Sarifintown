@@ -46,7 +46,7 @@ public static class SarifPrompts
     /// Loads deep code-flow evidence and organizational triage rules.
     /// </summary>
     [McpServerPrompt(Name = "sarif_review", Title = "Review Findings/Issues/Vulnerabilities (SAST/Secret/SCA)")]
-    [Description("READ-ONLY tool. Loads deep code-flow evidence and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability so you can decide if it is a true or false positive.")]
+    [Description("Provides deep code-flow evidence and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability so you can review/triage/decide if it is a true or false positive.")]
     public static string ReviewPrompt(
         [Description("Target DisplayId (e.g. 1), CSV displayid list (e.g. 1,2,3), or 'scope' to review all open findings/issues (max 25).")]
         string target = "scope")
