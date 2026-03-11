@@ -10,34 +10,24 @@ public static class SarifPrompts
     /// Builds a slash-command prompt for setting SARIF finding filters.
     /// </summary>
     [McpServerPrompt(Name = "sarif_filter", Title = "Filter Findings")]
-    [Description("Set or clear filters for SARIF findings. Call with no query to list available filter values.")]
+    [Description("Set or clear filters for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities. Call with no query to list available filter values.")]
     public static string FilterPrompt(
         [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit to list available filters.")]
         string query = "")
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            return """
-                EXECUTION PROTOCOL — follow these steps exactly:
-                1. Call `sarif_filter` with no arguments to list available filter values.
-                2. Output the result VERBATIM.
-                3. STOP and wait for the user to choose filters.
-                """;
+            return "List available filter values. Stop and wait for the user to choose.";
         }
 
-        return $"""
-            EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_filter` with query='{query}'.
-            2. Output the confirmation VERBATIM.
-            3. Call `sarif_get` to view filtered results.
-            """;
+        return $"Filter applied: query='{query}'. Proceed to call sarif_get to view the results.";
     }
 
     /// <summary>
     /// Builds a slash-command prompt for reading SARIF findings with current filters.
     /// </summary>
-    [McpServerPrompt(Name = "sarif_get", Title = "Get Triage Posture")]
-    [Description("Load a lightweight paginated findings index (ID, Rule, Severity, File Path). Call this FIRST in the sequential flow before sarif_review and sarif_update.")]
+    [McpServerPrompt(Name = "sarif_get", Title = "Get Security Findings")]
+    [Description("Load a lightweight SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities index (ID, Rule, Severity, File Path). Call this to see what needs review.")]
     public static string TriageQueryPrompt(
         [Description("Maximum finding count to return.")]
         int limit = 10,
@@ -48,33 +38,20 @@ public static class SarifPrompts
     {
         var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
 
-        return $"""
-            EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` with limit={safeLimit}, page={page}, pageToken='{pageToken}'.
-            2. Output exactly one <vulnerability_report> block VERBATIM. Do NOT summarize, interpret, duplicate, or append extra text.
-            3. STOP immediately and wait for explicit user instruction.
-            """;
+        return $"Fetch up to {safeLimit} findings (page={page}, token='{pageToken}'). Output exactly one <vulnerability_report> block. Do not add commentary.";
     }
 
     /// <summary>
     /// Slash-command prompt for reviewing, analyzing, inspecting, or triaging SARIF findings.
-    /// Loads deep code-flow evidence and organizational triage rules, then records a decision via sarif_update.
+    /// Loads deep code-flow evidence and organizational triage rules.
     /// </summary>
-    [McpServerPrompt(Name = "sarif_review", Title = "Review Findings")]
-    [Description("Review, analyze, inspect, or triage SARIF findings. Loads code-flow evidence and organizational rules so you can decide true/false positive.")]
+    [McpServerPrompt(Name = "sarif_review", Title = "Review Findings/Issues/Vulnerabilities (SAST/Secret/SCA)")]
+    [Description("READ-ONLY tool. Loads deep code-flow evidence and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability so you can decide if it is a true or false positive.")]
     public static string ReviewPrompt(
-        [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or 'scope' to review all open findings (max 25).")]
+        [Description("Target DisplayId (e.g. 1), CSV displayid list (e.g. 1,2,3), or 'scope' to review all open findings/issues (max 25).")]
         string target = "scope")
     {
-        return $"""
-            EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` to obtain the list of findings and their displayids.
-            2. Call `sarif_review` with target='{target}' to load code evidence and organizational rules.
-            3. Analyze the evidence using the rules in the <system_directive> block returned by sarif_review.
-            4. Call `sarif_update` with target='{target}', state=<your decision>, reason=<your reason>, llmReasoning=<your full chain-of-thought>.
-            5. Output exactly one <vulnerability_report> block VERBATIM from the sarif_update result. Do NOT summarize, interpret, or add commentary.
-            6. STOP and wait for user instruction.
-            """;
+        return $"Analyze the code evidence and rules for target='{target}'. Return your findings in a <system_directive> block. Wait for further instructions or proceed to record your decision.";
     }
 
     /// <summary>
@@ -82,7 +59,7 @@ public static class SarifPrompts
     /// Handles both AI-driven triage (with llmReasoning) and human manual overrides (without llmReasoning).
     /// </summary>
     [McpServerPrompt(Name = "sarif_update", Title = "Update Triage Decision")]
-    [Description("Record a triage decision. Call this AFTER analyzing the output of sarif_review.")]
+    [Description("Record a triage decision for a SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Call this AFTER analyzing the output of sarif_review.")]
     public static string UpdatePrompt(
         [Description("Decision state (confirmed, false_positive, test_code, wont_fix, mitigated).")]
         string state,
@@ -93,30 +70,18 @@ public static class SarifPrompts
         [Description("Optional AI chain-of-thought. Provide for AI triage. Omit for explicit human manual overrides.")]
         string llmReasoning = "")
     {
-        return $"""
-            EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_get` to identify the exact target displayid if needed.
-            2. Call `sarif_review` with target='{target}' if analysis evidence has not been loaded yet.
-            3. Call `sarif_update` with target='{target}', state='{state}', reason='{reason}', and llmReasoning='{llmReasoning}'.
-            4. Output the result block VERBATIM. Do NOT add commentary.
-            5. Call `sarif_get` to verify remaining findings.
-            """;
+        return $"Record decision for target='{target}': state='{state}', reason='{reason}'. Output the result VERBATIM.";
     }
 
     /// <summary>
     /// Builds a slash-command prompt for syncing pending triage decisions to upstream vendor APIs.
     /// </summary>
     [McpServerPrompt(Name = "sarif_sync", Title = "Sync Triage Decisions")]
-    [Description("Push pending local review decisions to upstream vendor APIs (e.g., Snyk, GitHub Advanced Security).")]
+    [Description("Push pending local review decisions for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities to upstream vendor APIs (e.g., Snyk, GitHub Advanced Security).")]
     public static string SyncPrompt(
         [Description("Target: 'pending' to sync all pending entries, or specific composite keys.")]
         string target = "pending")
     {
-        return $"""
-            EXECUTION PROTOCOL — follow these steps exactly:
-            1. Call `sarif_sync` with target='{target}'.
-            2. Output the result VERBATIM. Do NOT add commentary.
-            3. STOP and wait for user instruction.
-            """;
+        return $"Sync triage decisions for target='{target}'. Output result VERBATIM.";
     }
 }

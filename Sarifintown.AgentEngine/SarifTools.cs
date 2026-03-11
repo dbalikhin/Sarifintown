@@ -169,7 +169,7 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool(Name = "sarif_filter")]
-        [Description("Set or clear the active scope filter for SARIF findings. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values. Call sarif_get after filtering to view results.")]
+        [Description("Set or clear the active scope filter for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values.")]
         public static async Task<CallToolResult> SarifFilter(
             [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit or leave empty to list available filters.")]
             string query = "")
@@ -209,9 +209,9 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. Returns a paginated index of findings. CRITICAL EXECUTION PROTOCOL: (1) Output the content inside the <vulnerability_report> block VERBATIM. (2) Do NOT summarize, interpret, restate, or duplicate. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters. To triage a finding, call sarif_review with the target displayid to load code evidence and organizational rules.")]
+        [Description("Retrieve scoped SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities using the active filter. Returns a paginated index of results. Outputs exactly one <vulnerability_report> block VERBATIM without additional commentary.")]
         public static async Task<CallToolResult> SarifGet(
-            [Description("Maximum findings to return (1-25).")]
+            [Description("Maximum findings/issues to return (1-25).")]
             int limit = 10,
             [Description("Optional 1-based page number. When provided, this overrides automatic pagination and pageToken.")]
             int page = 0,
@@ -270,12 +270,11 @@ namespace Sarifintown.AgentEngine
 
         /// <summary>
         /// Context injector: loads deep code evidence and organizational rules for the LLM to analyze.
-        /// After analyzing the output, the LLM should call sarif_update to record its decision.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Review, analyze, inspect, or triage a SARIF finding by its displayid. Loads deep code-flow evidence, source snippets, and organizational triage rules so you can determine whether the finding is a true positive or false positive. Accepts a single 'target' parameter (displayid, CSV list, or 'scope'). After reviewing the evidence, call sarif_update to record the decision.")]
+        [Description("Retrieves detailed code-flow evidence, execution context, and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Use this to analyze an issue's source code before making a triage decision.")]
         public static async Task<CallToolResult> SarifReview(
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to review all open findings in active scope (max 25).")]
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), or literal 'scope' to review all open findings/issues in active scope (max 25).")]
             string target)
         {
             if (string.IsNullOrWhiteSpace(target))
@@ -345,15 +344,15 @@ namespace Sarifintown.AgentEngine
         /// Human callers omit llmReasoning to mark the decision as human-reviewed.
         /// </summary>
         [McpServerTool(Name = "sarif_update")]
-        [Description("Record a triage decision. If you are the AI analyzing evidence, you MUST provide your 'llmReasoning'. If a human user explicitly tells you to update a finding, leave 'llmReasoning' empty. CRITICAL EXECUTION PROTOCOL: (1) Call this tool after analyzing sarif_review output. (2) Output the result block VERBATIM. (3) Run sarif_get to verify remaining findings. IMPORTANT: This tool requires four parameters: 'target', 'state', 'reason', and 'llmReasoning'.")]
+        [Description("Records a triage decision for a SARIF (SAST/Secret/SCA) finding/issue/vulnerability into the audit ledger. Requires a state and a reason.")]
         public static async Task<CallToolResult> SarifUpdate(
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), or literal 'scope' to update all open findings/issues in active scope.")]
             string target,
             [Description("Decision state: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
             string state,
-            [Description("Decision reason explaining why this decision was made.")]
+            [Description("Explicit decision reason explaining why this decision was made.")]
             string reason,
-            [Description("Verbose chain-of-thought analysis. REQUIRED for AI callers. OMIT for human manual overrides.")]
+            [Description("Optional chain-of-thought analysis detailing how the conclusion was reached. Leave empty for human manual overrides.")]
             string llmReasoning = "")
         {
             if (string.IsNullOrWhiteSpace(target))
@@ -529,7 +528,7 @@ namespace Sarifintown.AgentEngine
         /// Pushes pending local triage decisions from the audit ledger to upstream vendor APIs.
         /// </summary>
         [McpServerTool(Name = "sarif_sync")]
-        [Description("Push local review decisions to upstream vendor APIs. Only processes entries with 'pending' sync status. Call this after using sarif_review to record decisions.")]
+        [Description("Pushes pending local triage decisions for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities to upstream vendor APIs.")]
         public static async Task<CallToolResult> SarifSync(
             [Description("Target: 'pending' to sync all pending entries, or specific composite keys (comma-separated).")]
             string target = "pending")
@@ -1700,7 +1699,7 @@ namespace Sarifintown.AgentEngine
             }
 
             lines.Add(string.Empty);
-            lines.Add("To triage a finding, call `sarif_review` with the target displayid to load code evidence and organizational rules.");
+            lines.Add("To review/triage a finding, call `sarif_review` with the target displayid to load code evidence and organizational rules.");
             if (pagination.HasMore)
             {
                 lines.Add($"More findings are available. Use `page` `{pagination.NextPageNumber}` or `context.pagination.next_page_token` to fetch the next batch.");
