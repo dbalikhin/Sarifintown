@@ -414,7 +414,7 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(setMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(1));
                 Assert.That(setMeta.GetProperty("pause").GetBoolean(), Is.True);
                 Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_review"));
-                Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Findings Index"));
+                Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## ??? SARIF Findings (Page 1 of 1)"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
                 await SarifTools.SarifFilter("severity:high rule:RULE-HIGH");

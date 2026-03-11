@@ -259,7 +259,7 @@ namespace Sarifintown.AgentEngine
         /// After analyzing the output, the LLM should call sarif_update to record its decision.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability before calling sarif_update. CRITICAL EXECUTION PROTOCOL: (1) Call sarif_get first to get target displayids. (2) Call sarif_review with the target displayid(s) to load code evidence and organizational rules. (3) Analyze the evidence using the rules in the system directive. (4) Call sarif_update with your target, state, reason, and llmReasoning. Do NOT stop after this tool; proceed with analysis immediately.")]
+        [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability before calling sarif_update. CRITICAL EXECUTION PROTOCOL: (1) Call sarif_get first to get target displayids. (2) Call sarif_review with the target displayid(s) to load code evidence and organizational rules. IMPORTANT: This tool ONLY takes the 'target' parameter. Do NOT try to pass 'state' or 'reason' to this tool. (3) Analyze the evidence using the rules in the system directive. (4) AFTER analysis, call sarif_update to record the decision (which does require state and reason). Do NOT stop after this tool; proceed with analysis immediately.")]
         public static async Task<CallToolResult> SarifReview(
             [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to review all open findings in active scope (max 25).")]
             string target)
@@ -331,7 +331,7 @@ namespace Sarifintown.AgentEngine
         /// Human callers omit llmReasoning to mark the decision as human-reviewed.
         /// </summary>
         [McpServerTool(Name = "sarif_update")]
-        [Description("Record a triage decision. If you are the AI analyzing evidence, you MUST provide your 'llmReasoning'. If a human user explicitly tells you to update a finding, leave 'llmReasoning' empty. CRITICAL EXECUTION PROTOCOL: (1) Call this tool after analyzing sarif_review output. (2) Output the result block VERBATIM. (3) Run sarif_get to verify remaining findings.")]
+        [Description("Record a triage decision. If you are the AI analyzing evidence, you MUST provide your 'llmReasoning'. If a human user explicitly tells you to update a finding, leave 'llmReasoning' empty. CRITICAL EXECUTION PROTOCOL: (1) Call this tool after analyzing sarif_review output. (2) Output the result block VERBATIM. (3) Run sarif_get to verify remaining findings. IMPORTANT: This tool requires four parameters: 'target', 'state', 'reason', and 'llmReasoning'.")]
         public static async Task<CallToolResult> SarifUpdate(
             [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
             string target,
@@ -820,6 +820,38 @@ namespace Sarifintown.AgentEngine
             var snippetPreloadStatus = await ResolveSnippetPreloadStatusAsync().ConfigureAwait(false);
 
             var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
+            ArgumentNullException.ThrowIfNull(activeScopeFindings);
+
+            var severityCounts = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.Severity) ? "Unknown" : item.Severity.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var statusCounts = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.State) ? "Unknown" : item.State.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var ruleGroups = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.RuleName) ? "Unknown" : item.RuleName.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            const int TopRuleLimit = 10;
+            var topRules = ruleGroups
+                .Take(TopRuleLimit)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var remainingRuleGroups = ruleGroups.Skip(TopRuleLimit).ToList();
+            var scopedStats = new ScopedStats(
+                severityCounts,
+                statusCounts,
+                topRules,
+                remainingRuleGroups.Count,
+                remainingRuleGroups.Sum(group => group.Count()));
 
             var effectiveOffset = Math.Min(cursorOffset, activeScopeFindings.Count);
             var executionFindings = activeScopeFindings
@@ -910,6 +942,7 @@ namespace Sarifintown.AgentEngine
                     snippetPreloadStatus,
                     pagination),
                 findingRows,
+                scopedStats,
                 availableFacets);
         }
 
@@ -1573,12 +1606,55 @@ namespace Sarifintown.AgentEngine
             ArgumentNullException.ThrowIfNull(payload);
             var findings = payload.Findings;
             var pagination = payload.Context.Pagination;
+            var metrics = payload.Context.Metrics;
+            var activeScope = payload.Context.ActiveScope;
+            var stats = payload.Stats;
+
+            var activeFilters = activeScope.Count == 0
+                ? "None (Showing all findings)"
+                : string.Join(", ", activeScope.Select(kvp => $"{kvp.Key}: {kvp.Value}"));
+
+            var severitySummary = stats.SeverityCounts.Count == 0
+                ? "None"
+                : string.Join(", ", stats.SeverityCounts.Select(kvp => $"{kvp.Key} ({kvp.Value})"));
+
+            var statusSummary = stats.StatusCounts.Count == 0
+                ? "None"
+                : string.Join(", ", stats.StatusCounts.Select(kvp => $"{kvp.Key} ({kvp.Value})"));
 
             var lines = new List<string>
             {
-                "## SARIF Findings Index",
+                $"## 🛡️ SARIF Findings (Page {pagination.PageNumber} of {pagination.TotalPages})",
+                string.Empty,
+                $"**Active Filters:** {EscapeMarkdown(activeFilters)}",
+                $"**Scope Summary:** {metrics.TotalInScope} total issues | Showing {metrics.ReturnedInBatch} in this batch",
+                string.Empty,
+                "### Statistics",
+                $"**Severities:** {EscapeMarkdown(severitySummary)}",
+                $"**Statuses:** {EscapeMarkdown(statusSummary)}",
+                "**Top Rules:**",
                 string.Empty
             };
+
+            if (stats.TopRules.Count == 0)
+            {
+                lines.Add("- None");
+            }
+            else
+            {
+                foreach (var (ruleName, count) in stats.TopRules)
+                {
+                    lines.Add($"- `{EscapeMarkdown(ruleName)}` ({count})");
+                }
+
+                if (stats.RemainingRulesCount > 0)
+                {
+                    lines.Add($"- *(...and {stats.RemainingRulesCount} more rules accounting for {stats.RemainingFindingsCount} more findings)*");
+                }
+            }
+
+            lines.Add(string.Empty);
+            lines.Add("### Findings in This Batch");
 
             if (findings.Count == 0)
             {
@@ -1586,10 +1662,11 @@ namespace Sarifintown.AgentEngine
             }
             else
             {
-                lines.Add("| Id | Rule | Severity | File Path |\n|---|---|---|---|");
+                lines.Add("| Id | Sev | Status | Rule | Path |");
+                lines.Add("|---|---|---|---|---|");
                 foreach (var finding in findings)
                 {
-                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.Location.File)}` |");
+                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}` |");
                 }
 
             }
@@ -2297,7 +2374,18 @@ namespace Sarifintown.AgentEngine
             TriageInspectResult? Evidence,
             string? TriagePrompt = null);
 
-        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, ScopedAvailableFacets? AvailableFacets = null);
+        private sealed record ScopedGetPayload(
+            ScopedContext Context,
+            IReadOnlyList<ScopedFinding> Findings,
+            ScopedStats Stats,
+            ScopedAvailableFacets? AvailableFacets = null);
+
+        private sealed record ScopedStats(
+            IReadOnlyDictionary<string, int> SeverityCounts,
+            IReadOnlyDictionary<string, int> StatusCounts,
+            IReadOnlyDictionary<string, int> TopRules,
+            int RemainingRulesCount,
+            int RemainingFindingsCount);
 
         private sealed record ScopedAvailableFacets(
             string[] Rules,
