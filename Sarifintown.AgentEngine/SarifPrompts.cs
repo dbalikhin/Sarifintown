@@ -57,13 +57,13 @@ public static class SarifPrompts
     }
 
     /// <summary>
-    /// Builds a slash-command prompt for loading code evidence and organizational rules before triage.
-    /// The LLM receives deep code flows and the assembled organizational rules, then calls sarif_update.
+    /// Slash-command prompt for reviewing, analyzing, inspecting, or triaging SARIF findings.
+    /// Loads deep code-flow evidence and organizational triage rules, then records a decision via sarif_update.
     /// </summary>
     [McpServerPrompt(Name = "sarif_review", Title = "Review Findings")]
-    [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability.")]
+    [Description("Review, analyze, inspect, or triage SARIF findings. Loads code-flow evidence and organizational rules so you can decide true/false positive.")]
     public static string ReviewPrompt(
-        [Description("Target displayid, CSV displayid list, or 'scope' (max 25).")]
+        [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or 'scope' to review all open findings (max 25).")]
         string target = "scope")
     {
         return $"""

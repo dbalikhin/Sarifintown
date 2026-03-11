@@ -170,13 +170,16 @@ namespace Sarifintown.AgentEngine
 
         [McpServerTool(Name = "sarif_filter")]
         [Description("Set or clear the active scope filter for SARIF findings. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values. Call sarif_get after filtering to view results.")]
-        public static Task<CallToolResult> SarifFilter(
+        public static async Task<CallToolResult> SarifFilter(
             [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit or leave empty to list available filters.")]
             string query = "")
         {
             if (string.IsNullOrWhiteSpace(query))
             {
-                return Task.FromResult(BuildAvailableFiltersResult());
+                var result = BuildAvailableFiltersResult();
+                await AppendToExecutionLogAsync("sarif_filter",
+                    $"Input: (empty — list available filters)\n\nOutput:\n{ExtractTextContent(result)}").ConfigureAwait(false);
+                return result;
             }
 
             var normalizedQuery = query.Trim();
@@ -184,7 +187,10 @@ namespace Sarifintown.AgentEngine
             {
                 SetActiveScope(new ActiveScopeFilter());
                 ResetPagination();
-                return Task.FromResult(CreatePlainTextResult("✅ Scope cleared. All filters removed. Run `sarif_get` to view unfiltered results."));
+                var clearResult = CreatePlainTextResult("✅ Scope cleared. All filters removed. Run `sarif_get` to view unfiltered results.");
+                await AppendToExecutionLogAsync("sarif_filter",
+                    $"Input: clear\n\nOutput:\n{ExtractTextContent(clearResult)}").ConfigureAwait(false);
+                return clearResult;
             }
 
             var parsedFilter = ParseSpaceSeparatedQuery(normalizedQuery);
@@ -196,7 +202,10 @@ namespace Sarifintown.AgentEngine
                 ? "none"
                 : string.Join(", ", scopeDict.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
 
-            return Task.FromResult(CreatePlainTextResult($"✅ Scope updated. Current filters: {filterDescription}. Run `sarif_get` to view results."));
+            var filterResult = CreatePlainTextResult($"✅ Scope updated. Current filters: {filterDescription}. Run `sarif_get` to view results.");
+            await AppendToExecutionLogAsync("sarif_filter",
+                $"Input: {normalizedQuery}\n\nOutput:\n{ExtractTextContent(filterResult)}").ConfigureAwait(false);
+            return filterResult;
         }
 
         [McpServerTool(Name = "sarif_get")]
@@ -247,8 +256,13 @@ namespace Sarifintown.AgentEngine
             metaObj["pause"] = true;
             metaObj["next_step"] = "sarif_review";
 
+            var getMarkdown = BuildScopedGetMarkdown(payload);
+
+            await AppendToExecutionLogAsync("sarif_get",
+                $"Input: limit={safeLimit}, page={page}, pageToken={pageToken}\n\nOutput:\n{getMarkdown}").ConfigureAwait(false);
+
             return CreateDualPurposeResult(
-                markdown: BuildScopedGetMarkdown(payload),
+                markdown: getMarkdown,
                 systemStateContext: stateContext,
                 resourceUri: BuildUiResourceUri("triage", "sarif_get", string.Empty),
                 additionalMeta: metaObj);
@@ -259,7 +273,7 @@ namespace Sarifintown.AgentEngine
         /// After analyzing the output, the LLM should call sarif_update to record its decision.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Load deep code evidence and organizational rules for specific findings. Call this FIRST to analyze a vulnerability before calling sarif_update. CRITICAL EXECUTION PROTOCOL: (1) Call sarif_get first to get target displayids. (2) Call sarif_review with the target displayid(s) to load code evidence and organizational rules. IMPORTANT: This tool ONLY takes the 'target' parameter. Do NOT try to pass 'state' or 'reason' to this tool. (3) Analyze the evidence using the rules in the system directive. (4) AFTER analysis, call sarif_update to record the decision (which does require state and reason). Do NOT stop after this tool; proceed with analysis immediately.")]
+        [Description("Review, analyze, inspect, or triage a SARIF finding by its displayid. Loads deep code-flow evidence, source snippets, and organizational triage rules so you can determine whether the finding is a true positive or false positive. Accepts a single 'target' parameter (displayid, CSV list, or 'scope'). After reviewing the evidence, call sarif_update to record the decision.")]
         public static async Task<CallToolResult> SarifReview(
             [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to review all open findings in active scope (max 25).")]
             string target)
@@ -312,7 +326,7 @@ namespace Sarifintown.AgentEngine
             var reviewMarkdown = BuildReviewContextMarkdown(target, evidenceByFindingId, systemDirective);
 
             await AppendToExecutionLogAsync("sarif_review",
-                $"Target: {target}\n\nEvidence:\n{reviewMarkdown}\n\nSystem Directive:\n{systemDirective ?? "(none)"}").ConfigureAwait(false);
+                $"Input: target={target}\n\nOutput:\n{reviewMarkdown}").ConfigureAwait(false);
 
             var reviewMeta = new JsonObject
             {
@@ -398,9 +412,6 @@ namespace Sarifintown.AgentEngine
 
             await ledger.UpsertAsync(ledgerItems);
 
-            await AppendToExecutionLogAsync("sarif_update",
-                $"Target: {target}\nState: {state}\nReason: {reason}\nllmReasoning: {llmReasoning}").ConfigureAwait(false);
-
             if (isAiTriage)
             {
                 var reviewStateContext = new
@@ -424,15 +435,25 @@ namespace Sarifintown.AgentEngine
                     ["next_step"] = "sarif_get"
                 };
 
+                var aiOutputMarkdown = BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count);
+
+                await AppendToExecutionLogAsync("sarif_update",
+                    $"Input: target={target}, state={state}, reason={reason}, llmReasoning={llmReasoning}\n\nOutput:\n{aiOutputMarkdown}").ConfigureAwait(false);
+
                 return CreateDualPurposeResult(
-                    markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count),
+                    markdown: aiOutputMarkdown,
                     systemStateContext: reviewStateContext,
                     resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
                     additionalMeta: aiMeta);
             }
 
+            var humanOutputMarkdown = BuildScopedTriageMarkdown(triagePayload);
+
+            await AppendToExecutionLogAsync("sarif_update",
+                $"Input: target={target}, state={state}, reason={reason}\n\nOutput:\n{humanOutputMarkdown}").ConfigureAwait(false);
+
             return CreateDualPurposeResult(
-                markdown: BuildScopedTriageMarkdown(triagePayload),
+                markdown: humanOutputMarkdown,
                 systemStateContext: null,
                 resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
                 additionalMeta: null);
@@ -531,7 +552,10 @@ namespace Sarifintown.AgentEngine
 
             if (entriesToSync.Count == 0)
             {
-                return CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+                var noOpResult = CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+                await AppendToExecutionLogAsync("sarif_sync",
+                    $"Input: target={target}\n\nOutput: No pending entries found.").ConfigureAwait(false);
+                return noOpResult;
             }
 
             var now = DateTime.UtcNow;
@@ -597,7 +621,11 @@ namespace Sarifintown.AgentEngine
                 lines.Add("ℹ️ No entries were processed.");
             }
 
-            return CreatePlainTextResult(string.Join(Environment.NewLine, lines));
+            var syncOutput = string.Join(Environment.NewLine, lines);
+            await AppendToExecutionLogAsync("sarif_sync",
+                $"Input: target={target}, entries_to_sync={entriesToSync.Count}\n\nOutput:\n{syncOutput}").ConfigureAwait(false);
+
+            return CreatePlainTextResult(syncOutput);
         }
 
         /// <summary>
@@ -1624,7 +1652,7 @@ namespace Sarifintown.AgentEngine
 
             var lines = new List<string>
             {
-                $"## 🛡️ SARIF Findings (Page {pagination.PageNumber} of {pagination.TotalPages})",
+                $"## SARIF Findings (Page {pagination.PageNumber} of {pagination.TotalPages})",
                 string.Empty,
                 $"**Active Filters:** {EscapeMarkdown(activeFilters)}",
                 $"**Scope Summary:** {metrics.TotalInScope} total issues | Showing {metrics.ReturnedInBatch} in this batch",
@@ -1928,6 +1956,19 @@ namespace Sarifintown.AgentEngine
             {
                 // Silently swallow — logging must never crash the main flow
             }
+        }
+
+        /// <summary>
+        /// Extracts concatenated text from a <see cref="CallToolResult"/> for execution logging.
+        /// </summary>
+        private static string ExtractTextContent(CallToolResult result)
+        {
+            if (result?.Content == null || result.Content.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            return string.Join(Environment.NewLine, result.Content.OfType<TextContentBlock>().Select(b => b.Text));
         }
 
 
