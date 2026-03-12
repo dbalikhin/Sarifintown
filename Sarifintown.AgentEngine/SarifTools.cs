@@ -217,7 +217,7 @@ namespace Sarifintown.AgentEngine
         [McpServerTool(Name = "sarif_review")]
         [Description("Retrieves detailed code-flow evidence, execution context, and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Use this to review/triage/analyze a finding/issue/vulnerability.")]
         public static async Task<CallToolResult> SarifReview(
-            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), or literal 'scope' to review all open findings/issues in active scope (max 25).")]
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), a range (e.g. '1-5'), or literal 'scope' to review all open findings/issues in active scope (max 25).")]
             string target)
         {
             if (string.IsNullOrWhiteSpace(target))
@@ -289,7 +289,7 @@ namespace Sarifintown.AgentEngine
         [McpServerTool(Name = "sarif_update")]
         [Description("Records a triage decision for a SARIF (SAST/Secret/SCA) finding/issue/vulnerability into the audit ledger. Requires a state and a reason.")]
         public static async Task<CallToolResult> SarifUpdate(
-            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), or literal 'scope' to update all open findings/issues in active scope.")]
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), a range (e.g. '1-5'), or literal 'scope' to update all open findings/issues in active scope.")]
             string target,
             [Description("Decision state: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
             string state,
@@ -1872,9 +1872,38 @@ namespace Sarifintown.AgentEngine
                 return new List<string>();
             }
 
-            return findingIds
-                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Distinct(StringComparer.Ordinal)
+            var result = new List<string>();
+            var parts = findingIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var part in parts)
+            {
+                var dashIndex = part.IndexOf('-');
+
+                if (dashIndex > 0 && dashIndex < part.Length - 1)
+                {
+                    var left = part[..dashIndex].Trim();
+                    var right = part[(dashIndex + 1)..].Trim();
+
+                    if (int.TryParse(left, out var start) && int.TryParse(right, out var end))
+                    {
+                        var min = Math.Min(start, end);
+                        var max = Math.Max(start, end);
+                        var safeMax = Math.Min(max, min + 100);
+
+                        for (var i = min; i <= safeMax; i++)
+                        {
+                            result.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        }
+
+                        continue;
+                    }
+                }
+
+                result.Add(part);
+            }
+
+            return result
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
