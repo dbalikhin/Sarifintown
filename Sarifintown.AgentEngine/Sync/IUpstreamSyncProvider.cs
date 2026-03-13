@@ -1,3 +1,4 @@
+using Sarifintown.AgentEngine.Configuration;
 using Sarifintown.Models;
 
 namespace Sarifintown.AgentEngine.Sync;
@@ -11,11 +12,9 @@ internal interface IUpstreamSyncProvider
     Task<SyncOperationResult> SyncTriageAsync(
         LedgerEntry entry,
         Result originalSarifResult,
-        SyncContext context,
+        SyncOptions options,
         CancellationToken cancellationToken);
 }
-
-internal sealed record SyncContext(string ApiToken, string OrganizationId);
 
 internal sealed record SyncOperationResult(
     bool IsSuccess,

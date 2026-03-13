@@ -1,3 +1,4 @@
+using Sarifintown.AgentEngine.Configuration;
 using Sarifintown.Models;
 
 namespace Sarifintown.AgentEngine.Sync;
@@ -21,16 +22,16 @@ internal sealed class GhasSyncProvider : IUpstreamSyncProvider
     public Task<SyncOperationResult> SyncTriageAsync(
         LedgerEntry entry,
         Result originalSarifResult,
-        SyncContext context,
+        SyncOptions options,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(originalSarifResult);
-        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(options);
 
-        if (string.IsNullOrWhiteSpace(context.ApiToken))
+        if (string.IsNullOrWhiteSpace(options.GitHubToken))
         {
-            return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:GhasToken (or Sync:GithubToken) is not configured."));
+            return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:GitHubToken is not configured."));
         }
 
         return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "GitHub Advanced Security sync provider is not implemented yet."));

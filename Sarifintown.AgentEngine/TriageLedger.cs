@@ -35,6 +35,9 @@ internal enum UpstreamSyncStatus
     [JsonStringEnumMemberName("synced")]
     Synced,
 
+    [JsonStringEnumMemberName("skipped")]
+    Skipped,
+
     [JsonStringEnumMemberName("failed")]
     Failed
 }
@@ -125,8 +128,36 @@ internal sealed record LedgerEntry
     [JsonPropertyName("partition_key")]
     public string PartitionKey { get; init; } = string.Empty;
 
+    [JsonPropertyName("finding_id")]
+    public string FindingId
+    {
+        get => Metadata.FindingId;
+        init => Metadata = Metadata with { FindingId = value ?? string.Empty };
+    }
+
+    [JsonPropertyName("local_state")]
+    public TriageDecisionState LocalState
+    {
+        get => TriageDecision.State;
+        init => TriageDecision = TriageDecision with { State = value };
+    }
+
     [JsonPropertyName("upstream_provider")]
     public string UpstreamProvider { get; init; } = string.Empty;
+
+    [JsonPropertyName("sync_status")]
+    public UpstreamSyncStatus SyncStatus
+    {
+        get => UpstreamSync.Status;
+        init => UpstreamSync = UpstreamSync with { Status = value };
+    }
+
+    [JsonPropertyName("sync_error_message")]
+    public string? SyncErrorMessage
+    {
+        get => UpstreamSync.ErrorMessage;
+        init => UpstreamSync = UpstreamSync with { ErrorMessage = value };
+    }
 
     [JsonPropertyName("upstream_state")]
     public string UpstreamState { get; init; } = string.Empty;
@@ -151,7 +182,7 @@ internal sealed record LedgerEntry
 internal sealed record TriageLedgerDocument
 {
     [JsonPropertyName("schema_version")]
-    public int SchemaVersion { get; init; } = 1;
+    public int SchemaVersion { get; init; } = 2;
 
     [JsonPropertyName("entries")]
     public Dictionary<string, LedgerEntry> Entries { get; init; } = new(StringComparer.Ordinal);

@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using Sarifintown.AgentEngine;
 using Sarifintown.AgentEngine.Configuration;
+using Sarifintown.AgentEngine.Sync;
 using Sarifintown.Core;
 
 AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
@@ -61,6 +62,12 @@ builder.Services.Configure<PromptAssemblyOptions>(
 builder.Services.Configure<SyncOptions>(
     builder.Configuration.GetSection(SyncOptions.SectionName));
 
+builder.Services.AddSingleton(new SyncHttpLoggingOptions(discovery.WorkspaceRoot));
+builder.Services.AddTransient<RedactingHttpLoggingHandler>();
+builder.Services
+    .AddHttpClient("SyncProviders")
+    .AddHttpMessageHandler<RedactingHttpLoggingHandler>();
+
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
@@ -112,8 +119,8 @@ var syncOptions = NormalizeSyncOptions(app.Services.GetRequiredService<IOptions<
 WriteStartupInfo(
     $"Sync options loaded: SnykToken={(string.IsNullOrWhiteSpace(syncOptions.SnykToken) ? "missing" : "configured")}, " +
     $"SnykOrgId={(string.IsNullOrWhiteSpace(syncOptions.SnykOrgId) ? "missing" : "configured")}, " +
-    $"GhasToken={(string.IsNullOrWhiteSpace(syncOptions.GhasToken) ? "missing" : "configured")}, " +
-    $"GithubToken={(string.IsNullOrWhiteSpace(syncOptions.GithubToken) ? "missing" : "configured")}");
+    $"GitHubToken={(string.IsNullOrWhiteSpace(syncOptions.GitHubToken) ? "missing" : "configured")}, " +
+    $"GitHubRepo={(string.IsNullOrWhiteSpace(syncOptions.GitHubRepo) ? "missing" : "configured")}");
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -122,6 +129,7 @@ SarifTools.StateService = sarifStateService;
 SarifTools.SnippetCache = snippetCacheService;
 SarifTools.SnippetWarmupService = snippetWarmupService;
 SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyService>();
+SarifTools.SyncHttpClientFactory = () => app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("SyncProviders");
 SarifTools.SetSyncOptions(syncOptions);
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
@@ -323,8 +331,8 @@ static SyncOptions NormalizeSyncOptions(SyncOptions? options)
     {
         SnykToken = options?.SnykToken?.Trim(),
         SnykOrgId = options?.SnykOrgId?.Trim(),
-        GhasToken = options?.GhasToken?.Trim(),
-        GithubToken = options?.GithubToken?.Trim()
+        GitHubToken = options?.GitHubToken?.Trim(),
+        GitHubRepo = options?.GitHubRepo?.Trim()
     };
 }
 
