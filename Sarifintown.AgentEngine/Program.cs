@@ -104,7 +104,6 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
-var sarifOptions = app.Services.GetRequiredService<IOptions<SarifOptions>>().Value;
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -116,27 +115,22 @@ SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyServi
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
-SarifTools.SetDebugPromptEnabled(sarifOptions.EnableDebugPrompt);
-SarifTools.SetIncludeEvidenceByDefault(sarifOptions.IncludeEvidenceByDefault);
 await RunStartupStageAsync("Available facets initialization", () => SarifTools.InitializeAvailableFacetsAsync());
 WriteStartupInfo("MCP tool dependencies configured.");
 
 await RunStartupStageAsync("Web host start", () => app.StartAsync());
 
-if (sarifOptions.EnableSnippetPreload)
-{
-    await RunStartupStageAsync(
-        $"Snippet preload bootstrap ({InitialSnippetPreloadCount})",
-        () => snippetWarmupService.PreloadSnippetsAsync(InitialSnippetPreloadCount, app.Lifetime.ApplicationStopping));
-    var bootstrapPreloadStatus = snippetWarmupService.GetPreloadStatus();
-    WriteStartupInfo($"Snippet preload bootstrap status: '{bootstrapPreloadStatus.Message}'");
+await RunStartupStageAsync(
+    $"Snippet preload bootstrap ({InitialSnippetPreloadCount})",
+    () => snippetWarmupService.PreloadSnippetsAsync(InitialSnippetPreloadCount, app.Lifetime.ApplicationStopping));
+var bootstrapPreloadStatus = snippetWarmupService.GetPreloadStatus();
+WriteStartupInfo($"Snippet preload bootstrap status: '{bootstrapPreloadStatus.Message}'");
 
-    _ = RunSnippetPreloadInBackgroundAsync(
-        snippetWarmupService,
-        InitialSnippetPreloadCount,
-        app.Lifetime.ApplicationStopping);
-    WriteStartupInfo($"Snippet preload bootstrap ({InitialSnippetPreloadCount}) completed; remaining preload scheduled in background");
-}
+_ = RunSnippetPreloadInBackgroundAsync(
+    snippetWarmupService,
+    InitialSnippetPreloadCount,
+    app.Lifetime.ApplicationStopping);
+WriteStartupInfo($"Snippet preload bootstrap ({InitialSnippetPreloadCount}) completed; remaining preload scheduled in background");
 
 static async ValueTask<CompleteResult> HandleCompletionRequestAsync(
     CompleteRequestParams request,

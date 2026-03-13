@@ -150,8 +150,6 @@ namespace Sarifintown.AgentEngine.Tests
                     await SarifTools.SarifFilter(config.Filter);
                 }
 
-                SarifTools.SetIncludeEvidenceByDefault(config.IncludeEvidence);
-
                 var result = await SarifTools.SarifGet(
                     limit: config.Limit);
 

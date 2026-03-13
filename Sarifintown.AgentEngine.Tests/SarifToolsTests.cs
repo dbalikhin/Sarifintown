@@ -351,8 +351,6 @@ namespace Sarifintown.AgentEngine.Tests
             SetInternalSarifToolsProperty("SnippetCache", null);
             SetInternalSarifToolsProperty("SnippetWarmupService", null);
             SetInternalSarifToolsProperty("PromptAssembly", null);
-            SarifTools.SetDebugPromptEnabled(false);
-            SarifTools.SetIncludeEvidenceByDefault(true);
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
             SarifTools.SetLocalUiBaseUrl(string.Empty);
             SarifTools.SetWorkspaceRoot(Directory.GetCurrentDirectory());
@@ -416,7 +414,7 @@ namespace Sarifintown.AgentEngine.Tests
                 Assert.That(setMeta.GetProperty("context").GetProperty("metrics").GetProperty("total_in_scope").GetInt32(), Is.EqualTo(1));
                 Assert.That(setMeta.GetProperty("pause").GetBoolean(), Is.True);
                 Assert.That(setMeta.GetProperty("next_step").GetString(), Is.EqualTo("sarif_review"));
-                Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Scoped Query"));
+                Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring("## SARIF Findings (Page 1 of 1)"));
                 Assert.That(((TextContentBlock)setResult.Content[0]).Text, Contains.Substring(SarifTools.StateContextDelimiter));
 
                 await SarifTools.SarifFilter("severity:high rule:RULE-HIGH");
@@ -515,7 +513,6 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetIncludeEvidenceByDefault(false);
                 var result = await SarifTools.SarifGet(limit: 100);
                 var meta = JsonSerializer.SerializeToElement(result.Meta);
 
@@ -605,39 +602,6 @@ namespace Sarifintown.AgentEngine.Tests
             Assert.That(payload.GetProperty("bridge").GetProperty("channel").GetString(), Is.EqualTo("sarifintown.mcp.v1"));
         }
 
-        [Test]
-        public void GenerateAnalysisReport_WithValidData_CreatesMarkdownFile()
-        {
-            var resultId = "0";
-            var extractedFlowData = @"{
-                ""rule_id"": ""RULE001"",
-                ""flow_steps"": [
-                    {
-                        ""file_path"": ""test.cs"",
-                        ""start_line"": 10,
-                        ""message"": ""Step 1"",
-                        ""code_snippet"": ""var x = 1;""
-                    }
-                ]
-            }";
-            var outputPath = Path.GetTempFileName();
-
-            try
-            {
-                var result = SarifTools.GenerateAnalysisReport(resultId, extractedFlowData, outputPath);
-
-                Assert.That(result, Contains.Substring("Report generated successfully"));
-                var fileContent = File.ReadAllText(outputPath);
-                Assert.That(fileContent, Contains.Substring("# Vulnerability Analysis Report"));
-                Assert.That(fileContent, Contains.Substring("**Rule ID:** RULE001"));
-                Assert.That(fileContent, Contains.Substring("test.cs (Line 10)"));
-                Assert.That(fileContent, Contains.Substring("var x = 1;"));
-            }
-            finally
-            {
-                File.Delete(outputPath);
-            }
-        }
 
         [Test]
         public void McpToolExposure_ContainsStatefulTools()
@@ -707,7 +671,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithDebugPromptTrue_IncludesDebugSection()
+        public async Task SarifReview_WithPromptAssembly_ReturnsSystemDirectiveAndEvidence()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -721,16 +685,16 @@ namespace Sarifintown.AgentEngine.Tests
             Directory.CreateDirectory(categoriesDir);
             File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Test Default SAST");
 
-            var sarifPath = Path.Combine(sarifDirectory, "debug-prompt.sarif");
+            var sarifPath = Path.Combine(sarifDirectory, "review-directive.sarif");
             File.WriteAllText(sarifPath, """
             {
               "runs": [
                 {
                   "results": [
                     {
-                      "ruleId": "RULE-DEBUG",
+                      "ruleId": "RULE-REVIEW-DIRECTIVE",
                       "level": "error",
-                      "message": { "text": "debug test finding" }
+                      "message": { "text": "review directive finding" }
                     }
                   ]
                 }
@@ -745,14 +709,17 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetDebugPromptEnabled(true);
+                var getResult = await SarifTools.SarifGet(limit: 10);
+                var meta = JsonSerializer.SerializeToElement(getResult.Meta);
+                var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
-                SarifTools.SetIncludeEvidenceByDefault(true);
-                var result = await SarifTools.SarifGet();
-                var text = ((TextContentBlock)result.Content[0]).Text;
+                var reviewResult = await SarifTools.SarifReview(target: displayId!);
+                var text = ((TextContentBlock)reviewResult.Content[0]).Text;
 
-                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompt"));
+                Assert.That(text, Contains.Substring("## Evidence for Review"));
+                Assert.That(text, Contains.Substring("<system_directive>"));
                 Assert.That(text, Contains.Substring("# Test Core Directive"));
+                Assert.That(text, Contains.Substring("Analyze the evidence above using the rules in the system directive."));
             }
             finally
             {
@@ -761,7 +728,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithDebugPromptFalse_OmitsDebugSection()
+        public async Task SarifGet_DoesNotIncludePromptOrEvidenceInResponse()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -775,16 +742,16 @@ namespace Sarifintown.AgentEngine.Tests
             Directory.CreateDirectory(categoriesDir);
             File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Test Default SAST");
 
-            var sarifPath = Path.Combine(sarifDirectory, "no-debug.sarif");
+            var sarifPath = Path.Combine(sarifDirectory, "no-prompt-in-get.sarif");
             File.WriteAllText(sarifPath, """
             {
               "runs": [
                 {
                   "results": [
                     {
-                      "ruleId": "RULE-NODEBUG",
+                      "ruleId": "RULE-NOPROMPTGET",
                       "level": "error",
-                      "message": { "text": "no debug" }
+                      "message": { "text": "no prompt in get" }
                     }
                   ]
                 }
@@ -799,15 +766,14 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetDebugPromptEnabled(false);
-
-                SarifTools.SetIncludeEvidenceByDefault(false);
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
-                Assert.That(text, Contains.Substring("Triage Analysis Instructions"));
-                Assert.That(text, Contains.Substring("# Test Core Directive"));
+                Assert.That(text, Does.Not.Contain("Triage Analysis Instructions"));
+                Assert.That(text, Does.Not.Contain("# Test Core Directive"));
+                Assert.That(text, Contains.Substring("## SARIF Findings (Page 1 of 1)"));
+                Assert.That(text, Contains.Substring("sarif_review"));
             }
             finally
             {
@@ -816,30 +782,22 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifReview_WithDebugPromptTrue_IncludesDebugSection()
+        public async Task SarifUpdate_WithLlmReasoning_RecordsAsAiDecision()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
             Directory.CreateDirectory(sarifDirectory);
 
-            var promptsDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "base");
-            Directory.CreateDirectory(promptsDir);
-            File.WriteAllText(Path.Combine(promptsDir, "core-directive.md"), "# Review Core Directive");
-            File.WriteAllText(Path.Combine(promptsDir, "output-format.md"), "# Review Output Format");
-            var categoriesDir = Path.Combine(workspace, ".sarif", "sarifintown-prompts", "categories");
-            Directory.CreateDirectory(categoriesDir);
-            File.WriteAllText(Path.Combine(categoriesDir, "default-sast.md"), "# Review Default SAST");
-
-            var sarifPath = Path.Combine(sarifDirectory, "review-debug.sarif");
+            var sarifPath = Path.Combine(sarifDirectory, "ai-triage.sarif");
             File.WriteAllText(sarifPath, """
             {
               "runs": [
                 {
                   "results": [
                     {
-                      "ruleId": "RULE-REVIEW-DEBUG",
+                      "ruleId": "RULE-AI-TRIAGE",
                       "level": "error",
-                      "message": { "text": "review debug finding" }
+                      "message": { "text": "ai triage finding" }
                     }
                   ]
                 }
@@ -849,28 +807,22 @@ namespace Sarifintown.AgentEngine.Tests
 
             SarifTools.SetWorkspaceRoot(workspace);
             SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
-            SetInternalSarifToolsProperty("PromptAssembly", new PromptAssemblyService(
-                Path.Combine(workspace, ".sarif", "sarifintown-prompts")));
 
             try
             {
-                SarifTools.SetDebugPromptEnabled(true);
-                SarifTools.SetIncludeEvidenceByDefault(true);
-
                 var getResult = await SarifTools.SarifGet(limit: 10);
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
-                var reviewResult = await SarifTools.SarifReview(
+                var updateResult = await SarifTools.SarifUpdate(
                     target: displayId!,
                     state: "false_positive",
                     reason: "Test code pattern",
-                    llmReasoning: "Analyzed the code flow",
-                    inputMarkdown: "evidence markdown");
-                var text = ((TextContentBlock)reviewResult.Content[0]).Text;
+                    llmReasoning: "I analyzed the code flow and determined this is not exploitable.");
+                var text = ((TextContentBlock)updateResult.Content[0]).Text;
 
-                Assert.That(text, Contains.Substring("DEBUG: Assembled Triage Prompt"));
-                Assert.That(text, Contains.Substring("# Review Core Directive"));
+                Assert.That(text, Contains.Substring("## SARIF Scoped Review"));
+                Assert.That(text, Contains.Substring("Ledger entries written:"));
             }
             finally
             {
@@ -879,22 +831,22 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifReview_WithDebugPromptFalse_OmitsDebugSection()
+        public async Task SarifReview_WithoutPromptAssembly_StillReturnsEvidenceStructure()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
             Directory.CreateDirectory(sarifDirectory);
 
-            var sarifPath = Path.Combine(sarifDirectory, "review-nodebug.sarif");
+            var sarifPath = Path.Combine(sarifDirectory, "review-no-assembly.sarif");
             File.WriteAllText(sarifPath, """
             {
               "runs": [
                 {
                   "results": [
                     {
-                      "ruleId": "RULE-REVIEW-NODEBUG",
+                      "ruleId": "RULE-REVIEW-NOASSEMBLY",
                       "level": "error",
-                      "message": { "text": "review no debug" }
+                      "message": { "text": "review no assembly" }
                     }
                   ]
                 }
@@ -907,21 +859,15 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetDebugPromptEnabled(false);
-                SarifTools.SetIncludeEvidenceByDefault(true);
-
                 var getResult = await SarifTools.SarifGet(limit: 10);
                 var meta = JsonSerializer.SerializeToElement(getResult.Meta);
                 var displayId = meta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString();
 
-                var reviewResult = await SarifTools.SarifReview(
-                    target: displayId!,
-                    state: "confirmed",
-                    reason: "Real vulnerability",
-                    llmReasoning: "Code is reachable",
-                    inputMarkdown: "evidence markdown");
+                var reviewResult = await SarifTools.SarifReview(target: displayId!);
                 var text = ((TextContentBlock)reviewResult.Content[0]).Text;
 
+                Assert.That(text, Contains.Substring("## Evidence for Review"));
+                Assert.That(text, Contains.Substring("Analyze the evidence above using the rules in the system directive."));
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
             }
             finally
@@ -1076,7 +1022,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifGet_WithIncludeEvidence_IncludesTriageInstructionsByDefault()
+        public async Task SarifGet_WithPromptAssembly_DoesNotIncludePromptContent()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -1114,13 +1060,13 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetIncludeEvidenceByDefault(true);
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
-                Assert.That(text, Contains.Substring("### Triage Analysis Instructions"));
-                Assert.That(text, Contains.Substring("# Core Directive"));
+                Assert.That(text, Does.Not.Contain("### Triage Analysis Instructions"));
+                Assert.That(text, Does.Not.Contain("# Core Directive"));
                 Assert.That(text, Does.Not.Contain("DEBUG: Assembled Triage Prompt"));
+                Assert.That(text, Contains.Substring("sarif_review"));
             }
             finally
             {
@@ -1157,7 +1103,6 @@ namespace Sarifintown.AgentEngine.Tests
 
             try
             {
-                SarifTools.SetIncludeEvidenceByDefault(true);
                 var result = await SarifTools.SarifGet();
                 var text = ((TextContentBlock)result.Content[0]).Text;
 
@@ -1167,6 +1112,124 @@ namespace Sarifintown.AgentEngine.Tests
             {
                 Directory.Delete(workspace, true);
             }
+        }
+
+        [Test]
+        public async Task SarifUpdate_WithRangeTarget_UpdatesEachFindingInRange()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 4).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-RANGE-{{index}}",
+                    "level": "error",
+                    "message": { "text": "range finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "range-update.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+
+                var triageResult = await SarifTools.SarifUpdate(
+                    target: "1-2",
+                    state: "false_positive",
+                    reason: "range state update");
+
+                var triageText = ((TextContentBlock)triageResult.Content[0]).Text;
+                Assert.That(triageText, Contains.Substring("`1` → `FP`"));
+                Assert.That(triageText, Contains.Substring("`2` → `FP`"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifReview_WithRangeTarget_IncludesEvidenceForEachExpandedDisplayId()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var resultsJson = string.Join(",", Enumerable.Range(1, 3).Select(index =>
+                $$"""
+                  {
+                    "ruleId": "RULE-REVIEW-{{index}}",
+                    "level": "error",
+                    "message": { "text": "review finding {{index}}" }
+                  }
+                """));
+
+            var sarifPath = Path.Combine(sarifDirectory, "range-review.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "results": [
+            {{resultsJson}}
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                var reviewResult = await SarifTools.SarifReview(target: "1-2");
+
+                var reviewText = ((TextContentBlock)reviewResult.Content[0]).Text;
+                Assert.That(reviewText, Contains.Substring("### Finding `1`"));
+                Assert.That(reviewText, Contains.Substring("### Finding `2`"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public void SarifTargetDescriptions_IncludeRangeSyntax()
+        {
+            var reviewParameter = typeof(SarifTools)
+                .GetMethod(nameof(SarifTools.SarifReview))!
+                .GetParameters()
+                .Single(p => p.Name == "target");
+
+            var updateParameter = typeof(SarifTools)
+                .GetMethod(nameof(SarifTools.SarifUpdate))!
+                .GetParameters()
+                .Single(p => p.Name == "target");
+
+            var reviewDescription = reviewParameter.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description;
+            var updateDescription = updateParameter.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description;
+
+            Assert.That(reviewDescription, Does.Contain("a range (e.g. '1-5')"));
+            Assert.That(updateDescription, Does.Contain("a range (e.g. '1-5')"));
         }
 
         private static void SetInternalSarifToolsProperty(string propertyName, object? value)

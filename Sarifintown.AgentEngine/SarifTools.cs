@@ -35,68 +35,9 @@ namespace Sarifintown.AgentEngine
         private static readonly Dictionary<string, string> DisplayIdToFindingId = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> FindingIdToDisplayId = new(StringComparer.Ordinal);
         private static int _nextDisplayId = 1;
-        private static bool _debugPromptEnabled;
-        private static bool _includeEvidenceByDefault = true;
         private static HashSet<string> _availableSeverities = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableRules = new(StringComparer.OrdinalIgnoreCase);
         private static HashSet<string> _availableStatuses = new(StringComparer.OrdinalIgnoreCase) { "Open", "TP", "FP" };
-        private static readonly string[] IdeHostTokens =
-        [
-            "vscode",
-            "visualstudiocode",
-            "visualstudio",
-            "cursor",
-            "windsurf",
-            "jetbrains",
-            "rider",
-            "zed",
-            "eclipse",
-            "intellij",
-            "xcode"
-        ];
-
-        private static readonly string[] CliHostTokens =
-        [
-            "claudecode",
-            "claude",
-            "codex",
-            "aider",
-            "geminicli",
-            "opencode",
-            "terminal",
-            "bash",
-            "zsh",
-            "fish",
-            "powershell",
-            "pwsh",
-            "cmd",
-            "windowsterminal",
-            "iterm",
-            "tmux",
-            "kitty",
-            "alacritty"
-        ];
-
-        private static readonly string[] VsCodeFamilyTokens =
-        [
-            "vscode",
-            "visualstudiocode",
-            "cursor",
-            "windsurf"
-        ];
-
-        private static readonly string[] JetBrainsFamilyTokens =
-        [
-            "jetbrains",
-            "rider",
-            "intellij",
-            "pycharm",
-            "webstorm",
-            "clion",
-            "goland",
-            "rubymine"
-        ];
-
         public static void SetDiscoveredSarifFiles(IEnumerable<string> discoveredSarifFiles)
         {
             ArgumentNullException.ThrowIfNull(discoveredSarifFiles);
@@ -109,28 +50,6 @@ namespace Sarifintown.AgentEngine
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                     .ToList();
-            }
-        }
-
-        /// <summary>
-        /// Enables or disables prompt debug mode for `sarif_get` at server startup.
-        /// </summary>
-        public static void SetDebugPromptEnabled(bool enabled)
-        {
-            lock (SyncRoot)
-            {
-                _debugPromptEnabled = enabled;
-            }
-        }
-
-        /// <summary>
-        /// Sets the default evidence inclusion behavior for `sarif_get` at server startup.
-        /// </summary>
-        public static void SetIncludeEvidenceByDefault(bool enabled)
-        {
-            lock (SyncRoot)
-            {
-                _includeEvidenceByDefault = enabled;
             }
         }
 
@@ -193,14 +112,17 @@ namespace Sarifintown.AgentEngine
         }
 
         [McpServerTool(Name = "sarif_filter")]
-        [Description("Set or clear the active scope filter for SARIF findings. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values. Call sarif_get after filtering to view results.")]
-        public static Task<CallToolResult> SarifFilter(
+        [Description("Set or clear the active scope filter for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities. Uses a space-separated query string (e.g. 'severity:high rule:SQLI status:open path:controllers'). Supported keys: status, severity, rule, path. Call with no arguments to see available filter values.")]
+        public static async Task<CallToolResult> SarifFilter(
             [Description("Space-separated filter query (e.g. 'severity:high rule:SQLI status:open path:controllers'). Omit or leave empty to list available filters.")]
             string query = "")
         {
             if (string.IsNullOrWhiteSpace(query))
             {
-                return Task.FromResult(BuildAvailableFiltersResult());
+                var result = BuildAvailableFiltersResult();
+                await AppendToExecutionLogAsync("sarif_filter",
+                    $"Input: (empty — list available filters)\n\nOutput:\n{ExtractTextContent(result)}").ConfigureAwait(false);
+                return result;
             }
 
             var normalizedQuery = query.Trim();
@@ -208,7 +130,10 @@ namespace Sarifintown.AgentEngine
             {
                 SetActiveScope(new ActiveScopeFilter());
                 ResetPagination();
-                return Task.FromResult(CreatePlainTextResult("✅ Scope cleared. All filters removed. Run `sarif_get` to view unfiltered results."));
+                var clearResult = CreatePlainTextResult("✅ Scope cleared. All filters removed. Run `sarif_get` to view unfiltered results.");
+                await AppendToExecutionLogAsync("sarif_filter",
+                    $"Input: clear\n\nOutput:\n{ExtractTextContent(clearResult)}").ConfigureAwait(false);
+                return clearResult;
             }
 
             var parsedFilter = ParseSpaceSeparatedQuery(normalizedQuery);
@@ -220,13 +145,16 @@ namespace Sarifintown.AgentEngine
                 ? "none"
                 : string.Join(", ", scopeDict.Select(kvp => $"{kvp.Key}:{kvp.Value}"));
 
-            return Task.FromResult(CreatePlainTextResult($"✅ Scope updated. Current filters: {filterDescription}. Run `sarif_get` to view results."));
+            var filterResult = CreatePlainTextResult($"✅ Scope updated. Current filters: {filterDescription}. Run `sarif_get` to view results.");
+            await AppendToExecutionLogAsync("sarif_filter",
+                $"Input: {normalizedQuery}\n\nOutput:\n{ExtractTextContent(filterResult)}").ConfigureAwait(false);
+            return filterResult;
         }
 
         [McpServerTool(Name = "sarif_get")]
-        [Description("Retrieve scoped SARIF findings using the active filter set by sarif_filter. Evidence inclusion and debug prompt output are controlled only by server startup settings. CRITICAL EXECUTION PROTOCOL: (1) Output exactly one vulnerability_report block VERBATIM from this tool result. (2) Do NOT summarize, interpret, restate, duplicate, or render additional tables. (3) STOP after output and wait for explicit user instruction. (4) Never call sarif_get again unless the user explicitly asks for another page. Use sarif_filter to change filters.")]
+        [Description("Retrieve scoped SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities using the active filter. Returns a paginated index of results. Outputs exactly one <vulnerability_report> block VERBATIM without additional commentary.")]
         public static async Task<CallToolResult> SarifGet(
-            [Description("Maximum findings to return (1-25).")]
+            [Description("Maximum findings/issues to return (1-25).")]
             int limit = 10,
             [Description("Optional 1-based page number. When provided, this overrides automatic pagination and pageToken.")]
             int page = 0,
@@ -234,15 +162,8 @@ namespace Sarifintown.AgentEngine
             string pageToken = "")
         {
             var safeLimit = limit <= 0 ? 10 : Math.Min(limit, 25);
-            bool debugPromptEnabled;
-            bool includeEvidenceByDefault;
-            lock (SyncRoot)
-            {
-                debugPromptEnabled = _debugPromptEnabled;
-                includeEvidenceByDefault = _includeEvidenceByDefault;
-            }
 
-            var payload = await ExecutePureGetAsync(includeEvidenceByDefault, safeLimit, page, debugPromptEnabled, pageToken);
+            var payload = await ExecutePureGetAsync(safeLimit, page, pageToken);
             var stateContext = new
             {
                 context = new
@@ -278,111 +199,110 @@ namespace Sarifintown.AgentEngine
             metaObj["pause"] = true;
             metaObj["next_step"] = "sarif_review";
 
+            var getMarkdown = BuildScopedGetMarkdown(payload);
+
+            await AppendToExecutionLogAsync("sarif_get",
+                $"Input: limit={safeLimit}, page={page}, pageToken={pageToken}\n\nOutput:\n{getMarkdown}").ConfigureAwait(false);
+
             return CreateDualPurposeResult(
-                markdown: BuildScopedGetMarkdown(payload),
+                markdown: getMarkdown,
                 systemStateContext: stateContext,
                 resourceUri: BuildUiResourceUri("triage", "sarif_get", string.Empty),
                 additionalMeta: metaObj);
         }
 
         /// <summary>
-        /// Autotriage: persists the LLM's triage decision and reasoning into the audit ledger.
-        /// The LLM must first call sarif_get to load evidence, analyze findings, then call this tool.
-        /// Does not make external API calls. Use sarif_sync to push decisions upstream.
+        /// Context injector: loads deep code evidence and organizational rules for the LLM to analyze.
         /// </summary>
         [McpServerTool(Name = "sarif_review")]
-        [Description("Record an AI triage decision for one or more SARIF findings into the local audit ledger. Requires prior evidence from sarif_get. CRITICAL EXECUTION PROTOCOL: (1) You MUST have already called sarif_get and received evidence for the target findings. (2) Analyze the evidence: code flow, snippets, rule description, severity. (3) Determine state and reason from your analysis. (4) Call this tool with target, state, reason, llmReasoning (your full chain-of-thought), and inputMarkdown (the evidence you analyzed). (5) Output exactly one <vulnerability_report> block VERBATIM from the result. (6) Do NOT summarize, interpret, or add commentary. (7) STOP and wait for user instruction. Use sarif_update instead for manual human overrides.")]
+        [Description("Retrieves detailed code-flow evidence, execution context, and organizational rules for a specific SARIF (SAST/Secret/SCA) finding/issue/vulnerability. Use this to review/triage/analyze a finding/issue/vulnerability.")]
         public static async Task<CallToolResult> SarifReview(
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to autotriage all open findings in active scope (max 25).")]
-            string target = "scope",
-            [Description("Decision state determined by analysis: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
-            string state = "",
-            [Description("Decision reason derived from the evidence analysis.")]
-            string reason = "",
-            [Description("Verbose chain-of-thought reasoning from the LLM analysis.")]
-            string llmReasoning = "",
-            [Description("The exact evidence markdown that was fed to the LLM for this decision.")]
-            string inputMarkdown = "")
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), a range (e.g. '1-5'), or literal 'scope' to review all open findings/issues in active scope (max 25).")]
+            string target)
         {
             if (string.IsNullOrWhiteSpace(target))
             {
                 return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
             }
 
-            if (string.IsNullOrWhiteSpace(state))
+            var workflow = CreateTriageWorkflowService();
+            List<string> targetIds;
+
+            if (string.Equals(target, "scope", StringComparison.OrdinalIgnoreCase))
             {
-                return CreatePlainTextResult("❌ `state` is required. Analyze the evidence from sarif_get and provide a decision: confirmed, false_positive, test_code, wont_fix, or mitigated.");
+                var activeScope = GetActiveScope();
+                var scopedFindings = await workflow.ListAsync(activeScope.ToQueryOptions(MaxEvidenceInspectCount));
+                targetIds = scopedFindings
+                    .Where(item => string.Equals(item.State, TriageFindingState.Open.ToString(), StringComparison.OrdinalIgnoreCase))
+                    .Select(item => item.FindingId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(MaxEvidenceInspectCount)
+                    .ToList();
+            }
+            else
+            {
+                targetIds = ResolveFindingIds(target)
+                    .Select(ResolveFindingIdFromAliasOrRaw)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
             }
 
-            if (string.IsNullOrWhiteSpace(reason))
-            {
-                return CreatePlainTextResult("❌ `reason` is required. Summarize your analysis of the evidence in 1-2 sentences.");
-            }
-
-            if (!TryParseTriageDecisionState(state, out var parsedDecision))
-            {
-                return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
-            }
-
-            var ledger = GetOrCreateLedgerService();
-
-            // Persist via the existing triage machinery so local state stays consistent
-            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "AI");
-            if (triagePayload.ModifiedFindingIds.Count == 0)
+            if (targetIds.Count == 0)
             {
                 return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
             }
 
-            // Resolve tool name from findings for composite key generation
-            var now = DateTime.UtcNow;
-            var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, "AI", humanReviewed: false,
-                llmReasoning, inputMarkdown, now);
+            var evidenceByFindingId = await workflow.InspectManyAsync(targetIds);
 
-            await ledger.UpsertAsync(ledgerItems);
-
-            var reviewStateContext = new
+            var promptAssembly = PromptAssembly;
+            string? systemDirective = null;
+            if (promptAssembly != null && evidenceByFindingId.Count > 0)
             {
-                review = new
-                {
-                    success = triagePayload.Success,
-                    state = triagePayload.State,
-                    workflow_state = triagePayload.WorkflowState,
-                    target = triagePayload.Target,
-                    affected_count = triagePayload.AffectedCount,
-                    modified_finding_ids = triagePayload.ModifiedFindingIds,
-                    ledger_entries_written = ledgerItems.Count,
-                    sync_status = "pending"
-                }
-            };
+                var findingsForPrompt = evidenceByFindingId.Values
+                    .Select(e => (e.RuleId, e.Message))
+                    .ToList();
+                systemDirective = await promptAssembly.BuildBatchTriagePromptAsync(findingsForPrompt).ConfigureAwait(false);
+            }
+
+            var reviewMarkdown = BuildReviewContextMarkdown(target, evidenceByFindingId, systemDirective);
+
+            await AppendToExecutionLogAsync("sarif_review",
+                $"Input: target={target}\n\nOutput:\n{reviewMarkdown}").ConfigureAwait(false);
 
             var reviewMeta = new JsonObject
             {
-                ["pause"] = true,
-                ["next_step"] = "sarif_get"
+                ["next_step"] = "sarif_update"
             };
 
-            return CreateDualPurposeResult(
-                markdown: BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count, await BuildReviewDebugPromptsAsync(triagePayload)),
-                systemStateContext: reviewStateContext,
+            return CreateReviewContextResult(
+                reviewMarkdown,
                 resourceUri: BuildUiResourceUri("triage", "sarif_review", string.Empty),
                 additionalMeta: reviewMeta);
         }
 
         /// <summary>
-        /// Manual override: applies a human-provided triage decision to specific findings,
-        /// marking them as human-reviewed in the audit ledger.
+        /// Unified writer: records a triage decision into the audit ledger.
+        /// AI callers must supply llmReasoning after analyzing evidence from sarif_review.
+        /// Human callers omit llmReasoning to mark the decision as human-reviewed.
         /// </summary>
         [McpServerTool(Name = "sarif_update")]
-        [Description("Manually override a triage decision for one or more findings. Sets human_reviewed=true in the audit ledger. Use this to correct or confirm AI-generated decisions. CRITICAL EXECUTION PROTOCOL: (1) Call this tool with a displayid from sarif_get output. (2) Output the result block VERBATIM. (3) Run sarif_get again to verify remaining findings.")]
+        [Description("Records a triage decision for a SARIF (SAST/Secret/SCA) finding/issue/vulnerability into the audit ledger. Requires a state and a reason.")]
         public static async Task<CallToolResult> SarifUpdate(
+            [Description("Target displayid (e.g. '1'), CSV displayid list (e.g. '1,2,3'), a range (e.g. '1-5'), or literal 'scope' to update all open findings/issues in active scope.")]
+            string target,
             [Description("Decision state: confirmed (true positive), false_positive (not a real issue), test_code (in test/non-production code), wont_fix (accepted risk), or mitigated (already addressed).")]
             string state,
-            [Description("Required decision reason/audit note explaining why this decision was made.")]
+            [Description("Explicit decision reason explaining why this decision was made.")]
             string reason,
-            [Description("Target displayid (e.g. 1), CSV displayid list (e.g. 1,2,3), or literal 'scope' to update all open findings in active scope.")]
-            string target)
+            [Description("Optional chain-of-thought analysis detailing how the conclusion was reached. Leave empty for human manual overrides.")]
+            string llmReasoning = "")
         {
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
+            }
+
             if (string.IsNullOrWhiteSpace(state))
             {
                 return CreatePlainTextResult("❌ `state` is required (confirmed, false_positive, test_code, wont_fix, mitigated).");
@@ -393,40 +313,96 @@ namespace Sarifintown.AgentEngine
                 return CreatePlainTextResult("❌ `reason` is required.");
             }
 
-            if (string.IsNullOrWhiteSpace(target))
-            {
-                return CreatePlainTextResult("❌ `target` is required (displayid, CSV list, or 'scope').");
-            }
-
             if (!TryParseTriageDecisionState(state, out var parsedDecision))
             {
                 return CreatePlainTextResult("❌ `state` must be one of: confirmed, false_positive, test_code, wont_fix, mitigated.");
             }
 
+            var isAiTriage = !string.IsNullOrWhiteSpace(llmReasoning);
+            var author = isAiTriage ? "AI" : "human_developer";
             var ledger = GetOrCreateLedgerService();
 
-            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, "human_developer");
+            var triagePayload = await ExecuteScopedTriageAsync(state, reason, target, author);
             if (triagePayload.ModifiedFindingIds.Count == 0)
             {
                 return CreatePlainTextResult("⚠️ No findings matched the target. Verify the displayid or scope.");
             }
 
+            // For AI triage: silently re-assemble the organizational rules prompt for the audit trail
+            string? systemPromptUsed = null;
+            if (isAiTriage)
+            {
+                var promptAssembly = PromptAssembly;
+                if (promptAssembly != null && triagePayload.Evidence.Count > 0)
+                {
+                    var findingsForPrompt = triagePayload.Evidence
+                        .Where(e => e.Evidence != null)
+                        .Select(e => (e.Evidence!.RuleId, e.Evidence!.Message))
+                        .ToList();
+                    if (findingsForPrompt.Count > 0)
+                    {
+                        systemPromptUsed = await promptAssembly.BuildBatchTriagePromptAsync(findingsForPrompt).ConfigureAwait(false);
+                    }
+                }
+            }
+
             var now = DateTime.UtcNow;
             var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, "human_developer", humanReviewed: true,
-                llmReasoning: string.Empty, inputMarkdown: string.Empty, now);
+                triagePayload, parsedDecision, reason, author,
+                humanReviewed: !isAiTriage,
+                llmReasoning, now, systemPromptUsed);
 
             await ledger.UpsertAsync(ledgerItems);
 
+            if (isAiTriage)
+            {
+                var reviewStateContext = new
+                {
+                    review = new
+                    {
+                        success = triagePayload.Success,
+                        state = triagePayload.State,
+                        workflow_state = triagePayload.WorkflowState,
+                        target = triagePayload.Target,
+                        affected_count = triagePayload.AffectedCount,
+                        modified_finding_ids = triagePayload.ModifiedFindingIds,
+                        ledger_entries_written = ledgerItems.Count,
+                        sync_status = "pending"
+                    }
+                };
+
+                var aiMeta = new JsonObject
+                {
+                    ["pause"] = true,
+                    ["next_step"] = "sarif_get"
+                };
+
+                var aiOutputMarkdown = BuildScopedReviewMarkdown(triagePayload, ledgerItems.Count);
+
+                await AppendToExecutionLogAsync("sarif_update",
+                    $"Input: target={target}, state={state}, reason={reason}, llmReasoning={llmReasoning}\n\nOutput:\n{aiOutputMarkdown}").ConfigureAwait(false);
+
+                return CreateDualPurposeResult(
+                    markdown: aiOutputMarkdown,
+                    systemStateContext: reviewStateContext,
+                    resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
+                    additionalMeta: aiMeta);
+            }
+
+            var humanOutputMarkdown = BuildScopedTriageMarkdown(triagePayload);
+
+            await AppendToExecutionLogAsync("sarif_update",
+                $"Input: target={target}, state={state}, reason={reason}\n\nOutput:\n{humanOutputMarkdown}").ConfigureAwait(false);
+
             return CreateDualPurposeResult(
-                markdown: BuildScopedTriageMarkdown(triagePayload),
+                markdown: humanOutputMarkdown,
                 systemStateContext: null,
                 resourceUri: BuildUiResourceUri("triage", "sarif_update", string.Empty),
                 additionalMeta: null);
         }
 
         /// <summary>
-        /// Builds ledger entries from a completed triage payload. Shared by SarifReview and SarifUpdate.
+        /// Builds ledger entries from a completed triage payload. Shared by SarifUpdate AI and human paths.
         /// </summary>
         private static async Task<List<(string CompositeKey, LedgerEntry Entry)>> BuildLedgerItemsAsync(
             ScopedTriagePayload triagePayload,
@@ -435,8 +411,8 @@ namespace Sarifintown.AgentEngine
             string author,
             bool humanReviewed,
             string llmReasoning,
-            string inputMarkdown,
-            DateTime timestamp)
+            DateTime timestamp,
+            string? systemPromptUsed)
         {
             var ledgerItems = new List<(string CompositeKey, LedgerEntry Entry)>();
 
@@ -474,9 +450,9 @@ namespace Sarifintown.AgentEngine
                     },
                     AuditLog = new LedgerAuditLog
                     {
-                        InputMarkdown = inputMarkdown,
                         LlmReasoning = llmReasoning,
-                        HumanReviewed = humanReviewed
+                        HumanReviewed = humanReviewed,
+                        SystemPromptUsed = humanReviewed ? null : systemPromptUsed
                     },
                     UpstreamSync = new LedgerUpstreamSync
                     {
@@ -495,7 +471,7 @@ namespace Sarifintown.AgentEngine
         /// Pushes pending local triage decisions from the audit ledger to upstream vendor APIs.
         /// </summary>
         [McpServerTool(Name = "sarif_sync")]
-        [Description("Push local review decisions to upstream vendor APIs. Only processes entries with 'pending' sync status. Call this after using sarif_review to record decisions.")]
+        [Description("Pushes pending local triage decisions for SARIF (SAST/Secret/SCA) findings/issues/vulnerabilities to upstream vendor APIs.")]
         public static async Task<CallToolResult> SarifSync(
             [Description("Target: 'pending' to sync all pending entries, or specific composite keys (comma-separated).")]
             string target = "pending")
@@ -518,7 +494,10 @@ namespace Sarifintown.AgentEngine
 
             if (entriesToSync.Count == 0)
             {
-                return CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+                var noOpResult = CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+                await AppendToExecutionLogAsync("sarif_sync",
+                    $"Input: target={target}\n\nOutput: No pending entries found.").ConfigureAwait(false);
+                return noOpResult;
             }
 
             var now = DateTime.UtcNow;
@@ -584,7 +563,11 @@ namespace Sarifintown.AgentEngine
                 lines.Add("ℹ️ No entries were processed.");
             }
 
-            return CreatePlainTextResult(string.Join(Environment.NewLine, lines));
+            var syncOutput = string.Join(Environment.NewLine, lines);
+            await AppendToExecutionLogAsync("sarif_sync",
+                $"Input: target={target}, entries_to_sync={entriesToSync.Count}\n\nOutput:\n{syncOutput}").ConfigureAwait(false);
+
+            return CreatePlainTextResult(syncOutput);
         }
 
         /// <summary>
@@ -708,65 +691,14 @@ namespace Sarifintown.AgentEngine
             [Description("When true for CLI mode, starts the Spectre.Console menu immediately.")]
             bool startCliMenu = false)
         {
-            var host = DetectHost(thisServer, hostHint);
-            var mode = ResolveHostMode(host);
-            var hostFamily = ResolveHostFamily(host);
-            var usedFallback = string.Equals(host, "unknown", StringComparison.OrdinalIgnoreCase);
-
-            if (mode == "ide-ui")
-            {
-                return JsonSerializer.Serialize(new
-                {
-                    host,
-                    mode,
-                    host_family = hostFamily,
-                    uri = "ui://sarifintown/mcp/dashboard",
-                    local_http_ui = CreateLocalHttpUiPayload(),
-                    bridge = new
-                    {
-                        transport = "postMessage",
-                        channel = "sarifintown.mcp.v1"
-                    },
-                    fallback = new
-                    {
-                        mode = "cli-tui",
-                        library = "Spectre.Console"
-                    }
-                });
-            }
-
-            string selectedAction = string.Empty;
-            string commandResult = string.Empty;
-            if (startCliMenu)
-            {
-                selectedAction = SpectreCliMenu.Start();
-                if (selectedAction.StartsWith("Triage ", StringComparison.Ordinal))
-                {
-                    commandResult = SpectreCliMenu
-                        .ExecuteTriageActionAsync(selectedAction)
-                        .GetAwaiter()
-                        .GetResult();
-                }
-            }
-
-            return JsonSerializer.Serialize(new
-            {
-                host,
-                mode,
-                host_family = hostFamily,
-                fallback_used = usedFallback,
-                local_http_ui = CreateLocalHttpUiPayload(),
-                tui = new
-                {
-                    library = "Spectre.Console",
-                    action = selectedAction,
-                    action_result = commandResult,
-                    menu = "interactive"
-                }
-            });
+            return InteractiveSurfaceResolver.ResolveInteractiveSurface(
+                thisServer,
+                hostHint,
+                startCliMenu,
+                CreateLocalHttpUiPayload);
         }
 
-        private static async Task<ScopedGetPayload> ExecutePureGetAsync(bool includeEvidence, int limit, int page = 0, bool debugPrompt = false, string pageToken = "")
+        private static async Task<ScopedGetPayload> ExecutePureGetAsync(int limit, int page = 0, string pageToken = "")
         {
             if (page < 0)
             {
@@ -807,6 +739,38 @@ namespace Sarifintown.AgentEngine
             var snippetPreloadStatus = await ResolveSnippetPreloadStatusAsync().ConfigureAwait(false);
 
             var activeScopeFindings = await workflow.ListAsync(activeScope.ToQueryOptions(int.MaxValue));
+            ArgumentNullException.ThrowIfNull(activeScopeFindings);
+
+            var severityCounts = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.Severity) ? "Unknown" : item.Severity.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var statusCounts = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.State) ? "Unknown" : item.State.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var ruleGroups = activeScopeFindings
+                .GroupBy(item => string.IsNullOrWhiteSpace(item.RuleName) ? "Unknown" : item.RuleName.Trim(), StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            const int TopRuleLimit = 10;
+            var topRules = ruleGroups
+                .Take(TopRuleLimit)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var remainingRuleGroups = ruleGroups.Skip(TopRuleLimit).ToList();
+            var scopedStats = new ScopedStats(
+                severityCounts,
+                statusCounts,
+                topRules,
+                remainingRuleGroups.Count,
+                remainingRuleGroups.Sum(group => group.Count()));
 
             var effectiveOffset = Math.Min(cursorOffset, activeScopeFindings.Count);
             var executionFindings = activeScopeFindings
@@ -831,30 +795,10 @@ namespace Sarifintown.AgentEngine
                 _paginationNextOffset = hasMore ? nextOffset : effectiveOffset;
             }
 
-            IReadOnlyDictionary<string, TriageInspectResult>? evidenceByFindingId = null;
-            if (includeEvidence && executionFindings.Count > 0)
-            {
-                var evidenceTargetIds = executionFindings
-                    .Select(item => item.FindingId)
-                    .Take(MaxEvidenceInspectCount)
-                    .ToList();
-
-                evidenceByFindingId = await workflow.InspectManyAsync(evidenceTargetIds);
-            }
-
-            var promptAssembly = PromptAssembly;
             var findingRows = new List<ScopedFinding>(executionFindings.Count);
             foreach (var finding in executionFindings)
             {
                 var displayId = GetOrCreateDisplayId(finding.FindingId);
-                TriageInspectResult? evidence = null;
-                if (includeEvidence && evidenceByFindingId != null)
-                {
-                    evidenceByFindingId.TryGetValue(finding.FindingId, out evidence);
-                }
-
-                // We skip generating per-finding triage prompt to avoid massive duplication
-                string? triagePrompt = null;
 
                 findingRows.Add(new ScopedFinding(
                     displayId,
@@ -862,22 +806,10 @@ namespace Sarifintown.AgentEngine
                     finding.Severity,
                     finding.State,
                     finding.RuleName,
-                    evidence?.Message ?? finding.RuleName,
+                    finding.RuleName,
                     new ScopedLocation(finding.FilePath, finding.LineNumber),
-                    evidence,
-                    triagePrompt));
-            }
-
-            string? batchedTriagePrompt = null;
-            if (promptAssembly != null && executionFindings.Count > 0)
-            {
-                var inputFindings = findingRows.Select(f => (f.Evidence?.RuleId ?? f.Rule, f.Evidence?.Message ?? f.Message!));
-                batchedTriagePrompt = await promptAssembly.BuildBatchTriagePromptAsync(inputFindings).ConfigureAwait(false);
-                // Attach the batched prompt to the first finding only, to transport it to the markdown builder
-                if (findingRows.Count > 0)
-                {
-                    findingRows[0] = findingRows[0] with { TriagePrompt = batchedTriagePrompt };
-                }
+                    null,
+                    null));
             }
 
             var metrics = new SarifGetMetrics(
@@ -929,7 +861,7 @@ namespace Sarifintown.AgentEngine
                     snippetPreloadStatus,
                     pagination),
                 findingRows,
-                debugPrompt,
+                scopedStats,
                 availableFacets);
         }
 
@@ -1107,49 +1039,6 @@ namespace Sarifintown.AgentEngine
             };
         }
 
-        private static ActiveScopeFilter ParseScopeFilter(string filter)
-        {
-            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var token in SplitFilterTokens(filter))
-            {
-                var separatorIndex = token.IndexOf(':');
-                if (separatorIndex <= 0 || separatorIndex == token.Length - 1)
-                {
-                    continue;
-                }
-
-                var key = token[..separatorIndex].Trim();
-                var value = token[(separatorIndex + 1)..].Trim().Trim('"', '\'');
-
-                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
-                {
-                    map[key] = value;
-                }
-            }
-
-            map.TryGetValue("severity", out var severity);
-            map.TryGetValue("rule", out var rule);
-
-            if (string.IsNullOrWhiteSpace(rule) && map.TryGetValue("ruleId", out var ruleId))
-            {
-                rule = ruleId;
-            }
-
-            map.TryGetValue("file", out var file);
-            if (string.IsNullOrWhiteSpace(file) && map.TryGetValue("path", out var path))
-            {
-                file = path;
-            }
-
-            map.TryGetValue("state", out var state);
-            if (string.IsNullOrWhiteSpace(state) && map.TryGetValue("status", out var status))
-            {
-                state = status;
-            }
-
-            return new ActiveScopeFilter(severity ?? string.Empty, rule ?? string.Empty, file ?? string.Empty, state ?? string.Empty);
-        }
-
         private static ActiveScopeFilter ParseSpaceSeparatedQuery(string query)
         {
             if (string.IsNullOrWhiteSpace(query))
@@ -1225,50 +1114,6 @@ namespace Sarifintown.AgentEngine
                     map[key] = value;
                 }
             }
-        }
-
-        private static IReadOnlyList<string> SplitFilterTokens(string filter)
-        {
-            if (string.IsNullOrWhiteSpace(filter))
-            {
-                return Array.Empty<string>();
-            }
-
-            var result = new List<string>();
-            var buffer = new System.Text.StringBuilder();
-            var inQuotes = false;
-
-            foreach (var ch in filter)
-            {
-                if (ch == '"')
-                {
-                    inQuotes = !inQuotes;
-                    buffer.Append(ch);
-                    continue;
-                }
-
-                if (ch == ',' && !inQuotes)
-                {
-                    var value = buffer.ToString().Trim();
-                    if (!string.IsNullOrWhiteSpace(value))
-                    {
-                        result.Add(value);
-                    }
-
-                    buffer.Clear();
-                    continue;
-                }
-
-                buffer.Append(ch);
-            }
-
-            var trailing = buffer.ToString().Trim();
-            if (!string.IsNullOrWhiteSpace(trailing))
-            {
-                result.Add(trailing);
-            }
-
-            return result;
         }
 
         private static ActiveScopeFilter GetActiveScope()
@@ -1464,13 +1309,6 @@ namespace Sarifintown.AgentEngine
                 scope.State.Trim()).ToLowerInvariant();
         }
 
-        private static string GetWorkspaceRoot()
-        {
-            lock (SyncRoot)
-            {
-                return _workspaceRoot;
-            }
-        }
 
         private static CallToolResult CreateDualPurposeResult(
             string markdown,
@@ -1591,69 +1429,57 @@ namespace Sarifintown.AgentEngine
         private static string BuildScopedGetMarkdown(ScopedGetPayload payload)
         {
             ArgumentNullException.ThrowIfNull(payload);
-            var metrics = payload.Context.Metrics;
             var findings = payload.Findings;
-            var currentPage = payload.Context.Pagination.PageNumber;
-            var totalPages = payload.Context.Pagination.TotalPages;
-            var nextPage = payload.Context.Pagination.NextPageNumber ?? currentPage;
+            var pagination = payload.Context.Pagination;
+            var metrics = payload.Context.Metrics;
+            var activeScope = payload.Context.ActiveScope;
+            var stats = payload.Stats;
+
+            var activeFilters = activeScope.Count == 0
+                ? "None (Showing all findings)"
+                : string.Join(", ", activeScope.Select(kvp => $"{kvp.Key}: {kvp.Value}"));
+
+            var severitySummary = stats.SeverityCounts.Count == 0
+                ? "None"
+                : string.Join(", ", stats.SeverityCounts.Select(kvp => $"{kvp.Key} ({kvp.Value})"));
+
+            var statusSummary = stats.StatusCounts.Count == 0
+                ? "None"
+                : string.Join(", ", stats.StatusCounts.Select(kvp => $"{kvp.Key} ({kvp.Value})"));
 
             var lines = new List<string>
             {
-                "## SARIF Scoped Query",
+                $"## SARIF Findings (Page {pagination.PageNumber} of {pagination.TotalPages})",
+                string.Empty,
+                $"**Active Filters:** {EscapeMarkdown(activeFilters)}",
+                $"**Scope Summary:** {metrics.TotalInScope} total issues | Showing {metrics.ReturnedInBatch} in this batch",
+                string.Empty,
+                "### Statistics",
+                $"**Severities:** {EscapeMarkdown(severitySummary)}",
+                $"**Statuses:** {EscapeMarkdown(statusSummary)}",
+                "**Top Rules:**",
                 string.Empty
             };
 
-            // Display active filters
-            var activeScope = payload.Context.ActiveScope;
-            if (activeScope.Count > 0)
+            if (stats.TopRules.Count == 0)
             {
-                lines.Add("### Active Filters");
-                foreach (var kvp in activeScope)
-                {
-                    lines.Add($"- **{kvp.Key}**: `{EscapeMarkdown(kvp.Value)}`");
-                }
-
-                lines.Add(string.Empty);
+                lines.Add("- None");
             }
             else
             {
-                lines.Add("### Active Filters");
-                lines.Add("- *(none — showing all findings)*");
-                lines.Add(string.Empty);
-            }
-
-            lines.Add($"- Total in scope: **{metrics.TotalInScope}**");
-            lines.Add($"- Returned in batch: **{metrics.ReturnedInBatch}**");
-            lines.Add($"- Remaining in scope: **{metrics.RemainingInScope}**");
-            lines.Add($"- Snippet preload status: **{payload.Context.SnippetPreloadStatus}**");
-            lines.Add($"- Page: **{currentPage} of {totalPages}**");
-            lines.Add($"- Page size: **{payload.Context.Pagination.PageSize}**");
-            lines.Add($"- Has more: **{payload.Context.Pagination.HasMore}**");
-            lines.Add(string.Empty);
-
-            // Display top noisy directories
-            if (payload.AvailableFacets?.TopLeafDirectories is { Length: > 0 } dirs)
-            {
-                lines.Add("### Top Directories");
-                foreach (var dir in dirs)
+                foreach (var (ruleName, count) in stats.TopRules)
                 {
-                    lines.Add($"- `{EscapeMarkdown(dir)}`");
+                    lines.Add($"- `{EscapeMarkdown(ruleName)}` ({count})");
                 }
 
-                lines.Add(string.Empty);
+                if (stats.RemainingRulesCount > 0)
+                {
+                    lines.Add($"- *(...and {stats.RemainingRulesCount} more rules accounting for {stats.RemainingFindingsCount} more findings)*");
+                }
             }
 
-            if (payload.Context.Pagination.HasMore)
-            {
-                lines.Add($"- Next page: **{nextPage} of {totalPages}**");
-                lines.Add(string.Empty);
-            }
-
-            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
-            {
-                lines.Add($"- Previous page: **{payload.Context.Pagination.PreviousPageNumber.Value} of {totalPages}**");
-                lines.Add(string.Empty);
-            }
+            lines.Add(string.Empty);
+            lines.Add("### Findings in This Batch");
 
             if (findings.Count == 0)
             {
@@ -1661,61 +1487,25 @@ namespace Sarifintown.AgentEngine
             }
             else
             {
-                lines.Add("| Id | Severity | State | Rule | Location |\n|---|---|---|---|---|");
+                lines.Add("| Id | Sev | Status | Rule | Path |");
+                lines.Add("|---|---|---|---|---|");
                 foreach (var finding in findings)
                 {
-                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}`:{finding.Location.Line?.ToString() ?? "?"} |");
+                    lines.Add($"| `{EscapeMarkdown(finding.DisplayId)}` | `{EscapeMarkdown(finding.Severity)}` | `{EscapeMarkdown(finding.State)}` | `{EscapeMarkdown(finding.Rule)}` | `{EscapeMarkdown(finding.Location.File)}` |");
                 }
 
             }
 
             lines.Add(string.Empty);
-            lines.Add("**STOP:** Wait for explicit user instruction.");
-            lines.Add("If the user asks to review/triage findings, call `sarif_review` with the target displayid. You must analyze the evidence above and provide your state, reason, and llmReasoning.");
-            lines.Add("If the user wants to manually override a decision, call `sarif_update` with state, reason, and target.");
-            lines.Add("To change filters, call `sarif_filter`.");
-            if (payload.Context.Pagination.HasMore)
+            lines.Add("To review/triage a finding, call `sarif_review` with the target displayid to load code evidence and organizational rules.");
+            if (pagination.HasMore)
             {
-                lines.Add($"Optional fetch: if the user explicitly asks for more findings, call `sarif_get` once with `page: {nextPage}` or with `context.pagination.next_page_token`.");
-                lines.Add("Do not auto-fetch another batch; wait for the user instruction.");
+                lines.Add($"More findings are available. Use `page` `{pagination.NextPageNumber}` or `context.pagination.next_page_token` to fetch the next batch.");
             }
 
-            if (payload.Context.Pagination.PreviousPageNumber.HasValue)
+            if (pagination.PreviousPageNumber.HasValue)
             {
-                lines.Add($"To go back, call `sarif_get` once with `page: {payload.Context.Pagination.PreviousPageNumber.Value}`.");
-            }
-
-            var consolidatedPrompt = findings.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.TriagePrompt))?.TriagePrompt;
-            if (!string.IsNullOrWhiteSpace(consolidatedPrompt))
-            {
-                lines.Add(string.Empty);
-                lines.Add("---");
-
-                if (payload.DebugPrompt)
-                {
-                    lines.Add("### DEBUG: Assembled Triage Prompt");
-                    lines.Add(string.Empty);
-                    lines.Add("<details><summary>Batched Triage System Prompt</summary>");
-                    lines.Add(string.Empty);
-                    lines.Add("```markdown");
-                    lines.Add(consolidatedPrompt);
-                    lines.Add("```");
-                    lines.Add(string.Empty);
-                    lines.Add("</details>");
-                    lines.Add(string.Empty);
-                }
-                else
-                {
-                    lines.Add("### Triage Analysis Instructions");
-                    lines.Add("Follow these instructions when analyzing the findings above for review.");
-                    lines.Add(string.Empty);
-                    lines.Add("<details><summary>View Execution Directives</summary>");
-                    lines.Add(string.Empty);
-                    lines.Add(consolidatedPrompt);
-                    lines.Add(string.Empty);
-                    lines.Add("</details>");
-                    lines.Add(string.Empty);
-                }
+                lines.Add($"To fetch the previous batch, use `page` `{pagination.PreviousPageNumber.Value}`.");
             }
 
             return string.Join(Environment.NewLine, lines);
@@ -1810,45 +1600,178 @@ namespace Sarifintown.AgentEngine
         }
 
         /// <summary>
-        /// Builds debug prompt entries for reviewed findings when debug prompt mode is enabled.
+        /// Builds the evidence markdown + embedded system directive + call-to-action for sarif_review responses.
         /// </summary>
-        private static async Task<string?> BuildReviewDebugPromptsAsync(
-            ScopedTriagePayload triagePayload)
+        private static string BuildReviewContextMarkdown(
+            string target,
+            IReadOnlyDictionary<string, TriageInspectResult> evidenceByFindingId,
+            string? systemDirective)
         {
-            bool debugEnabled;
-            lock (SyncRoot)
+            ArgumentNullException.ThrowIfNull(evidenceByFindingId);
+
+            var lines = new List<string>
             {
-                debugEnabled = _debugPromptEnabled;
+                "## Evidence for Review",
+                string.Empty,
+                $"Target: `{EscapeMarkdown(target)}`",
+                string.Empty
+            };
+
+            foreach (var (findingId, evidence) in evidenceByFindingId)
+            {
+                string displayId;
+                lock (SyncRoot)
+                {
+                    displayId = FindingIdToDisplayId.TryGetValue(findingId, out var did) ? did : findingId;
+                }
+
+                lines.Add($"### Finding `{EscapeMarkdown(displayId)}`");
+                lines.Add(string.Empty);
+                lines.Add($"- Rule: `{EscapeMarkdown(evidence.RuleId)}`");
+                lines.Add($"- Severity: `{EscapeMarkdown(evidence.Severity)}`");
+                lines.Add($"- State: `{EscapeMarkdown(evidence.State)}`");
+                lines.Add($"- Message: {EscapeMarkdown(evidence.Message)}");
+
+                if (!string.IsNullOrWhiteSpace(evidence.RuleDescription))
+                {
+                    lines.Add(string.Empty);
+                    lines.Add($"**Rule Description:** {EscapeMarkdown(evidence.RuleDescription)}");
+                }
+
+                lines.Add(string.Empty);
+                lines.Add("#### Data Flow");
+                if (evidence.DataFlowEvidenceBlocks.Count > 0)
+                {
+                    foreach (var block in evidence.DataFlowEvidenceBlocks)
+                    {
+                        lines.Add($"**Steps `{block.StartStepIndex}`-`{block.EndStepIndex}`** at `{EscapeMarkdown(block.FilePath)}`:{block.StartLine?.ToString() ?? "?"}-{block.EndLine?.ToString() ?? "?"}");
+                        lines.Add("```csharp");
+                        lines.Add(block.CodeSnippet);
+                        lines.Add("```");
+                    }
+                }
+                else if (evidence.DataFlowSteps.Count > 0)
+                {
+                    foreach (var step in evidence.DataFlowSteps)
+                    {
+                        lines.Add($"**Step `{step.Index}`** at `{EscapeMarkdown(step.FilePath)}`:{step.StartLine?.ToString() ?? "?"} — {EscapeMarkdown(step.Message)}");
+                        if (!string.IsNullOrWhiteSpace(step.CodeSnippet))
+                        {
+                            lines.Add("```csharp");
+                            lines.Add(step.CodeSnippet);
+                            lines.Add("```");
+                        }
+                    }
+                }
+                else
+                {
+                    lines.Add("- No data flow available for this finding.");
+                }
+
+                lines.Add(string.Empty);
             }
 
-            if (!debugEnabled)
+            if (!string.IsNullOrWhiteSpace(systemDirective))
             {
-                return null;
+                lines.Add("---");
+                lines.Add(string.Empty);
+                lines.Add("<system_directive>");
+                lines.Add(systemDirective);
+                lines.Add("</system_directive>");
+                lines.Add(string.Empty);
             }
 
-            var promptAssembly = PromptAssembly;
-            if (promptAssembly == null)
-            {
-                return null;
-            }
+            lines.Add("---");
+            lines.Add(string.Empty);
+            lines.Add("Analyze the evidence above using the rules in the system directive. Output your chain of thought, and your final decision.");
 
-            var inputs = triagePayload.Evidence
-                .Where(e => !string.IsNullOrWhiteSpace(e.Evidence?.RuleId) || !string.IsNullOrWhiteSpace(e.Evidence?.Message))
-                .Select(e => (e.Evidence!.RuleId, e.Evidence!.Message))
-                .ToList();
-
-            if (inputs.Count == 0)
-            {
-                return null;
-            }
-
-            return await promptAssembly.BuildBatchTriagePromptAsync(inputs).ConfigureAwait(false);
+            return string.Join(Environment.NewLine, lines);
         }
+
+        /// <summary>
+        /// Builds a CallToolResult for sarif_review responses (no "output verbatim and stop" contract).
+        /// </summary>
+        private static CallToolResult CreateReviewContextResult(
+            string reviewMarkdown,
+            string resourceUri,
+            JsonObject? additionalMeta = null)
+        {
+            var meta = new JsonObject();
+            if (!string.IsNullOrWhiteSpace(resourceUri))
+            {
+                var csp = BuildUiCsp(resourceUri);
+                meta["ui"] = new JsonObject
+                {
+                    ["resourceUri"] = resourceUri,
+                    ["csp"] = csp
+                };
+            }
+
+            if (additionalMeta != null)
+            {
+                foreach (var property in additionalMeta)
+                {
+                    meta[property.Key] = property.Value?.DeepClone();
+                }
+            }
+
+            return new CallToolResult
+            {
+                Content = new List<ContentBlock>
+                {
+                    new TextContentBlock { Text = reviewMarkdown?.Trim() ?? string.Empty }
+                },
+                Meta = meta
+            };
+        }
+
+        /// <summary>
+        /// Appends a diagnostic entry to the agent execution log for developer observability.
+        /// Errors are silently swallowed so logging never disrupts the main flow.
+        /// </summary>
+        private static async Task AppendToExecutionLogAsync(string actionName, string rawContent)
+        {
+            try
+            {
+                string workspaceRoot;
+                lock (SyncRoot)
+                {
+                    workspaceRoot = _workspaceRoot;
+                }
+
+                var logPath = Path.Combine(workspaceRoot, ".sarif", "agent-execution.log");
+                var logDirectory = Path.GetDirectoryName(logPath)!;
+                if (!Directory.Exists(logDirectory))
+                {
+                    Directory.CreateDirectory(logDirectory);
+                }
+
+                var entry = $"[{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}] ACTION: {actionName}{Environment.NewLine}{rawContent}{Environment.NewLine}---{Environment.NewLine}";
+                await File.AppendAllTextAsync(logPath, entry).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Silently swallow — logging must never crash the main flow
+            }
+        }
+
+        /// <summary>
+        /// Extracts concatenated text from a <see cref="CallToolResult"/> for execution logging.
+        /// </summary>
+        private static string ExtractTextContent(CallToolResult result)
+        {
+            if (result?.Content == null || result.Content.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            return string.Join(Environment.NewLine, result.Content.OfType<TextContentBlock>().Select(b => b.Text));
+        }
+
 
         private static string BuildScopedReviewMarkdown(
             ScopedTriagePayload payload,
-            int ledgerEntriesWritten,
-            string? debugPrompt = null)
+            int ledgerEntriesWritten)
         {
             ArgumentNullException.ThrowIfNull(payload);
 
@@ -1933,22 +1856,6 @@ namespace Sarifintown.AgentEngine
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(debugPrompt))
-            {
-                lines.Add(string.Empty);
-                lines.Add("---");
-                lines.Add("### DEBUG: Assembled Triage Prompt");
-                lines.Add(string.Empty);
-                lines.Add("<details><summary>Batched Triage System Prompt</summary>");
-                lines.Add(string.Empty);
-                lines.Add("```markdown");
-                lines.Add(debugPrompt);
-                lines.Add("```");
-                lines.Add(string.Empty);
-                lines.Add("</details>");
-                lines.Add(string.Empty);
-            }
-
             lines.Add(string.Empty);
             lines.Add("**STOP:** Wait for explicit user instruction.");
             lines.Add("Run `sarif_get` to verify remaining findings in scope.");
@@ -1965,9 +1872,38 @@ namespace Sarifintown.AgentEngine
                 return new List<string>();
             }
 
-            return findingIds
-                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Distinct(StringComparer.Ordinal)
+            var result = new List<string>();
+            var parts = findingIds.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var part in parts)
+            {
+                var dashIndex = part.IndexOf('-');
+
+                if (dashIndex > 0 && dashIndex < part.Length - 1)
+                {
+                    var left = part[..dashIndex].Trim();
+                    var right = part[(dashIndex + 1)..].Trim();
+
+                    if (int.TryParse(left, out var start) && int.TryParse(right, out var end))
+                    {
+                        var min = Math.Min(start, end);
+                        var max = Math.Max(start, end);
+                        var safeMax = Math.Min(max, min + 100);
+
+                        for (var i = min; i <= safeMax; i++)
+                        {
+                            result.Add(i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        }
+
+                        continue;
+                    }
+                }
+
+                result.Add(part);
+            }
+
+            return result
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
@@ -2047,7 +1983,7 @@ namespace Sarifintown.AgentEngine
                 Options.Create(new SarifOptions
                 {
                     Strategy = PreloadStrategy.LatestPerTool,
-                    EnableSnippetPreload = false
+                    EnableSnippetPreload = true
                 }),
                 workspaceRoot,
                 discoveredFiles);
@@ -2061,172 +1997,6 @@ namespace Sarifintown.AgentEngine
                 workspaceRoot,
                 snippetCache,
                 snippetWarmupService);
-        }
-
-        private static string DetectHost(McpServer thisServer, string hostHint)
-        {
-            if (!string.IsNullOrWhiteSpace(hostHint))
-            {
-                return hostHint.Trim();
-            }
-
-            if (thisServer != null)
-            {
-                var hostFromServer = TryGetHostNameFromServer(thisServer);
-                if (!string.IsNullOrWhiteSpace(hostFromServer))
-                {
-                    return hostFromServer;
-                }
-            }
-
-            var hostFromEnvironment = TryGetHostNameFromEnvironment();
-            if (!string.IsNullOrWhiteSpace(hostFromEnvironment))
-            {
-                return hostFromEnvironment;
-            }
-
-            return "unknown";
-        }
-
-        private static string ResolveHostMode(string host)
-        {
-            if (string.IsNullOrWhiteSpace(host))
-            {
-                return "cli-tui";
-            }
-
-            var normalizedHost = NormalizeHost(host);
-
-            if (ContainsAnyToken(normalizedHost, IdeHostTokens))
-            {
-                return "ide-ui";
-            }
-
-            if (ContainsAnyToken(normalizedHost, CliHostTokens))
-            {
-                return "cli-tui";
-            }
-
-            return "cli-tui";
-        }
-
-        private static string ResolveHostFamily(string host)
-        {
-            if (string.IsNullOrWhiteSpace(host))
-            {
-                return "terminal-family";
-            }
-
-            var normalizedHost = NormalizeHost(host);
-
-            if (ContainsAnyToken(normalizedHost, VsCodeFamilyTokens))
-            {
-                return "vscode-family";
-            }
-
-            if (ContainsAnyToken(normalizedHost, JetBrainsFamilyTokens))
-            {
-                return "jetbrains-family";
-            }
-
-            if (normalizedHost.Contains("visualstudio", StringComparison.Ordinal))
-            {
-                return "visualstudio-family";
-            }
-
-            if (normalizedHost.Contains("zed", StringComparison.Ordinal))
-            {
-                return "zed-family";
-            }
-
-            if (ContainsAnyToken(normalizedHost, CliHostTokens))
-            {
-                return "terminal-family";
-            }
-
-            return "unknown-family";
-        }
-
-        private static string TryGetHostNameFromEnvironment()
-        {
-            var directValueVariables = new[]
-            {
-                "MCP_CLIENT_NAME",
-                "MCP_HOST",
-                "MCP_CLIENT",
-                "TERM_PROGRAM",
-                "TERM",
-                "TERMINAL_EMULATOR",
-                "PROMPT_TOOLKIT_SHELL",
-                "VSCODE_CWD",
-                "ELECTRON_RUN_AS_NODE"
-            };
-
-            foreach (var variable in directValueVariables)
-            {
-                var value = Environment.GetEnvironmentVariable(variable);
-                if (!string.IsNullOrWhiteSpace(value))
-                {
-                    return value.Trim();
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLAUDECODE")))
-            {
-                return "Claude Code";
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CURSOR_TRACE_ID")))
-            {
-                return "Cursor";
-            }
-
-            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VSCODE_GIT_IPC_HANDLE")))
-            {
-                return "Visual Studio Code";
-            }
-
-            return string.Empty;
-        }
-
-        private static string NormalizeHost(string host)
-        {
-            var lowered = host.Trim().ToLowerInvariant();
-
-            return string.Concat(lowered.Where(char.IsLetterOrDigit));
-        }
-
-        private static bool ContainsAnyToken(string normalizedHost, IEnumerable<string> tokens)
-        {
-            return tokens.Any(token => normalizedHost.Contains(token, StringComparison.Ordinal));
-        }
-
-        private static string TryGetHostNameFromServer(McpServer server)
-        {
-            var directClientInfo = GetPropertyValue(server, "ClientInfo");
-            var directName = GetPropertyValue(directClientInfo, "Name")?.ToString();
-
-            if (!string.IsNullOrWhiteSpace(directName))
-            {
-                return directName.Trim();
-            }
-
-            var initializeRequest = GetPropertyValue(server, "InitializeRequest");
-            var requestClientInfo = GetPropertyValue(initializeRequest, "ClientInfo");
-            var requestClientName = GetPropertyValue(requestClientInfo, "Name")?.ToString();
-
-            if (!string.IsNullOrWhiteSpace(requestClientName))
-            {
-                return requestClientName.Trim();
-            }
-
-            var session = GetPropertyValue(server, "Session");
-            var sessionClientInfo = GetPropertyValue(session, "ClientInfo");
-            var sessionClientName = GetPropertyValue(sessionClientInfo, "Name")?.ToString();
-
-            return string.IsNullOrWhiteSpace(sessionClientName)
-                ? string.Empty
-                : sessionClientName.Trim();
         }
 
         private static object CreateLocalHttpUiPayload()
@@ -2305,7 +2075,18 @@ namespace Sarifintown.AgentEngine
             TriageInspectResult? Evidence,
             string? TriagePrompt = null);
 
-        private sealed record ScopedGetPayload(ScopedContext Context, IReadOnlyList<ScopedFinding> Findings, bool DebugPrompt = false, ScopedAvailableFacets? AvailableFacets = null);
+        private sealed record ScopedGetPayload(
+            ScopedContext Context,
+            IReadOnlyList<ScopedFinding> Findings,
+            ScopedStats Stats,
+            ScopedAvailableFacets? AvailableFacets = null);
+
+        private sealed record ScopedStats(
+            IReadOnlyDictionary<string, int> SeverityCounts,
+            IReadOnlyDictionary<string, int> StatusCounts,
+            IReadOnlyDictionary<string, int> TopRules,
+            int RemainingRulesCount,
+            int RemainingFindingsCount);
 
         private sealed record ScopedAvailableFacets(
             string[] Rules,
@@ -2328,63 +2109,6 @@ namespace Sarifintown.AgentEngine
             string DisplayId,
             TriageInspectResult? Evidence);
 
-        [Description("MUST: Use this tool to compile extracted flow JSON into a markdown report artifact for downstream analysis.")]
-        public static string GenerateAnalysisReport(
-            [Description("Result identifier for report metadata.")]
-            string resultId,
-            [Description("Extracted flow JSON payload returned by ExtractCodeFlow.")]
-            string extractedFlowData,
-            [Description("Destination markdown file path.")]
-            string outputPath)
-        {
-            try
-            {
-                var flowData = JsonSerializer.Deserialize<JsonElement>(extractedFlowData);
-                string ruleId = flowData.TryGetProperty("rule_id", out var ruleElement) ? ruleElement.GetString() ?? "Unknown_Rule" : "Unknown_Rule";
-
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"# Vulnerability Analysis Report");
-                sb.AppendLine($"**Rule ID:** {ruleId}");
-                sb.AppendLine($"**Result Index:** {resultId}");
-                sb.AppendLine($"**Date Generated:** {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
-                sb.AppendLine("\n## Data Flow Context\n");
-
-                if (flowData.TryGetProperty("flow_steps", out var stepsElement) && stepsElement.ValueKind == JsonValueKind.Array)
-                {
-                    int stepNum = 1;
-                    foreach (var step in stepsElement.EnumerateArray())
-                    {
-                        string file = step.GetProperty("file_path").GetString() ?? "unknown_file";
-                        int line = step.TryGetProperty("start_line", out var lineElem) ? lineElem.GetInt32() : 0;
-                        string snippet = step.GetProperty("code_snippet").GetString() ?? "";
-                        string msg = step.TryGetProperty("message", out var msgElement) ? msgElement.GetString() ?? "" : "";
-
-                        sb.AppendLine($"### Step {stepNum}: {file} (Line {line})");
-                        if (!string.IsNullOrEmpty(msg)) sb.AppendLine($"*Context:* {msg}\n");
-                        sb.AppendLine("```csharp");
-                        sb.AppendLine(snippet);
-                        sb.AppendLine("```\n");
-                        stepNum++;
-                    }
-                }
-                else
-                {
-                    sb.AppendLine("*No valid data flow steps extracted.*");
-                }
-
-                File.WriteAllText(outputPath, sb.ToString());
-
-                return JsonSerializer.Serialize(new
-                {
-                    success = true,
-                    message = "Report generated successfully.",
-                    file_path = Path.GetFullPath(outputPath)
-                });
-            }
-            catch (Exception ex)
-            {
-                return JsonSerializer.Serialize(new { error = $"Failed to generate report: {ex.Message}" });
-            }
-        }
+        
     }
 }

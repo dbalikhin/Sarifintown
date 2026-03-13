@@ -88,6 +88,12 @@ internal sealed record LedgerAuditLog
 
     [JsonPropertyName("human_reviewed")]
     public bool HumanReviewed { get; init; }
+
+    /// <summary>
+    /// The assembled organizational rules prompt injected via sarif_review. Null for human overrides.
+    /// </summary>
+    [JsonPropertyName("system_prompt_used")]
+    public string? SystemPromptUsed { get; init; }
 }
 
 /// <summary>

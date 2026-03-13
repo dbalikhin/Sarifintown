@@ -14,8 +14,4 @@ internal sealed class SarifOptions
     public PreloadStrategy Strategy { get; set; } = PreloadStrategy.LatestPerTool;
 
     public bool EnableSnippetPreload { get; set; } = true;
-
-    public bool EnableDebugPrompt { get; set; }
-
-    public bool IncludeEvidenceByDefault { get; set; } = true;
 }
