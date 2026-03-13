@@ -33,6 +33,19 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        private sealed class StubSnykSuccessHandler : HttpMessageHandler
+        {
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                var response = new HttpResponseMessage(System.Net.HttpStatusCode.Created)
+                {
+                    Content = new StringContent("{\"data\":{\"id\":\"ignore-1\"}}")
+                };
+
+                return Task.FromResult(response);
+            }
+        }
+
         [Test]
         public async Task SarifGet_WithKeepAndNoPageToken_AutoAdvancesWithinSameScope()
         {
@@ -1216,7 +1229,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifSync_WithAcceptedSarifSuppression_MarksEntrySyncedWithoutProviderCall()
+        public async Task SarifSync_WithAcceptedSarifSuppression_MarksEntrySkippedWithoutProviderCall()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -1261,14 +1274,14 @@ namespace Sarifintown.AgentEngine.Tests
                 var syncResult = await SarifTools.SarifSync();
                 var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
 
-                Assert.That(syncText, Contains.Substring("already had accepted SARIF suppressions"));
+                Assert.That(syncText, Contains.Substring("🚫 **1** entries skipped"));
 
                 var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
                 var ledgerJson = await File.ReadAllTextAsync(ledgerPath);
                 using var ledgerDoc = JsonDocument.Parse(ledgerJson);
                 var entry = ledgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
-                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("synced"));
-                Assert.That(entry.GetProperty("upstream_state").GetString(), Is.EqualTo("accepted"));
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("skipped"));
+                Assert.That(entry.GetProperty("upstream_state").GetString(), Is.EqualTo("not-vulnerable"));
             }
             finally
             {
@@ -1277,7 +1290,7 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
-        public async Task SarifSync_WithConfirmedState_SkipsUpstreamCallAndMarksSyncedWithoutTokens()
+        public async Task SarifSync_WithConfirmedState_SkipsUpstreamCallAndMarksSkippedWithoutTokens()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             var sarifDirectory = Path.Combine(workspace, ".sarif");
@@ -1316,14 +1329,80 @@ namespace Sarifintown.AgentEngine.Tests
                 var syncResult = await SarifTools.SarifSync();
                 var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
 
-                Assert.That(syncText, Contains.Substring("entries synced successfully"));
+                Assert.That(syncText, Contains.Substring("🚫 **1** entries skipped"));
 
                 var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
                 var ledgerJson = await File.ReadAllTextAsync(ledgerPath);
                 using var ledgerDoc = JsonDocument.Parse(ledgerJson);
                 var entry = ledgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
-                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("synced"));
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("skipped"));
                 Assert.That(entry.GetProperty("upstream_state").GetString(), Is.EqualTo("local-only"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifSync_WithHttpSync_RedactsAuthorizationHeaderInSyncLog()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-http-log.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-HTTP-LOG",
+                      "level": "error",
+                      "message": { "text": "sync with logging" },
+                      "fingerprints": {
+                        "snyk/asset/finding/v1": "issue-123"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SarifTools.SetSyncOptions(new Sarifintown.AgentEngine.Configuration.SyncOptions
+            {
+                SnykToken = "token-secret-value",
+                SnykOrgId = "org-123"
+            });
+
+            SetInternalSarifToolsProperty(
+                "SyncHttpClientFactory",
+                (Func<HttpClient>)(() => CreateSyncHttpClientWithRedactingLogging(workspace, new StubSnykSuccessHandler())));
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "false_positive", reason: "redaction-check");
+
+                var syncResult = await SarifTools.SarifSync();
+                var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
+                Assert.That(syncText, Contains.Substring("✅ **1** entries synced successfully."));
+
+                var logPath = Path.Combine(workspace, ".sarif", "sarif_sync_http.log");
+                Assert.That(File.Exists(logPath), Is.True);
+
+                var logText = await File.ReadAllTextAsync(logPath);
+                Assert.That(logText, Contains.Substring("Authorization: [REDACTED]"));
+                Assert.That(logText, Does.Not.Contain("token-secret-value"));
             }
             finally
             {
@@ -1355,6 +1434,25 @@ namespace Sarifintown.AgentEngine.Tests
         {
             var property = typeof(SarifTools).GetProperty(propertyName, BindingFlags.Static | BindingFlags.NonPublic);
             property!.SetValue(null, value);
+        }
+
+        private static HttpClient CreateSyncHttpClientWithRedactingLogging(string workspaceRoot, HttpMessageHandler terminalHandler)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
+            ArgumentNullException.ThrowIfNull(terminalHandler);
+
+            var assembly = typeof(SarifTools).Assembly;
+            var optionsType = assembly.GetType("Sarifintown.AgentEngine.Sync.SyncHttpLoggingOptions", throwOnError: true)!;
+            var handlerType = assembly.GetType("Sarifintown.AgentEngine.Sync.RedactingHttpLoggingHandler", throwOnError: true)!;
+
+            var options = Activator.CreateInstance(optionsType, workspaceRoot)
+                ?? throw new InvalidOperationException("Unable to create SyncHttpLoggingOptions instance.");
+
+            var loggingHandler = (DelegatingHandler?)(Activator.CreateInstance(handlerType, options)
+                ?? throw new InvalidOperationException("Unable to create RedactingHttpLoggingHandler instance."));
+
+            loggingHandler.InnerHandler = terminalHandler;
+            return new HttpClient(loggingHandler, disposeHandler: true);
         }
     }
 }
