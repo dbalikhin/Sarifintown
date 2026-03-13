@@ -49,12 +49,12 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
 
         if (string.IsNullOrWhiteSpace(context.ApiToken))
         {
-            return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "SNYK_TOKEN environment variable is not set.", ShouldAbortBatch: true);
+            return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:SnykToken is not configured.", ShouldAbortBatch: true);
         }
 
         if (string.IsNullOrWhiteSpace(context.OrganizationId))
         {
-            return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "SNYK_ORG_ID environment variable is not set.");
+            return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:SnykOrgId is not configured.");
         }
 
         var fingerprints = originalSarifResult.Fingerprints;

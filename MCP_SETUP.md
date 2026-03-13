@@ -57,7 +57,8 @@ Different clients use different top-level keys: `"servers"` (Visual Studio, VS C
       "command": "sarifintown",
       "args": [],
       "env": {
-        "PROJECT_ROOT": "/path/to/your/workspace"
+        "PROJECT_ROOT": "/path/to/your/workspace",
+        "SNYK_ORG_ID": "your-snyk-org-id"
       }
     }
   }
@@ -73,6 +74,7 @@ Different clients use different top-level keys: `"servers"` (Visual Studio, VS C
 | `transport` | Yes | Must be `stdio`. |
 | `command` | Yes | `sarifintown` (global tool) or `dotnet` with `args: ["run", "--project", "..."]`. |
 | `env.PROJECT_ROOT` | Recommended | Absolute path. Ensures deterministic `.sarif` discovery. |
+| `env.SNYK_ORG_ID` | Recommended for `sarif_sync` with Snyk findings | Snyk organization ID used during upstream sync; read from environment, not as a `sarif_sync` command argument. |
 | `env.MCP_CLIENT_NAME` | Optional | Improves host detection (e.g. `"Cursor"`, `"Claude Code"`). Also recognized: `MCP_HOST`, `MCP_CLIENT`. |
 | `cwd` | Optional | Useful for predictable relative paths. |
 
@@ -132,6 +134,14 @@ Tune SARIF preload behavior via env vars:
 |---|---|---|
 | `SARIFINTOWN_Sarif__Strategy` | `None`, `LatestPerTool`, `All` | `LatestPerTool` |
 | `SARIFINTOWN_Sarif__EnableSnippetPreload` | `true` / `false` | `true` |
+
+Sync credentials/context for upstream push operations:
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `SNYK_TOKEN` | `sarif_sync` (Snyk) | Required when syncing Snyk ignore states. |
+| `SNYK_ORG_ID` | `sarif_sync` (Snyk) | Required org identifier for Snyk sync. Provide via MCP `env`; do not pass as a `sarif_sync` command parameter. |
+| `GHAS_TOKEN` / `GITHUB_TOKEN` | `sarif_sync` (GitHub Advanced Security) | Token used for GHAS sync adapters. |
 
 Example:
 

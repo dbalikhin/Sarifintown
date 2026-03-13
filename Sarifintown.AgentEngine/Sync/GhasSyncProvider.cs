@@ -30,7 +30,7 @@ internal sealed class GhasSyncProvider : IUpstreamSyncProvider
 
         if (string.IsNullOrWhiteSpace(context.ApiToken))
         {
-            return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "GHAS_TOKEN (or GITHUB_TOKEN) environment variable is not set."));
+            return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:GhasToken (or Sync:GithubToken) is not configured."));
         }
 
         return Task.FromResult(new SyncOperationResult(false, UpstreamSyncStatus.Failed, "GitHub Advanced Security sync provider is not implemented yet."));

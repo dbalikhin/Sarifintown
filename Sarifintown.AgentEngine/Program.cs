@@ -58,6 +58,9 @@ builder.Services.Configure<SarifOptions>(
 builder.Services.Configure<PromptAssemblyOptions>(
     builder.Configuration.GetSection(PromptAssemblyOptions.SectionName));
 
+builder.Services.Configure<SyncOptions>(
+    builder.Configuration.GetSection(SyncOptions.SectionName));
+
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
@@ -104,6 +107,13 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
+var syncOptions = NormalizeSyncOptions(app.Services.GetRequiredService<IOptions<SyncOptions>>().Value);
+
+WriteStartupInfo(
+    $"Sync options loaded: SnykToken={(string.IsNullOrWhiteSpace(syncOptions.SnykToken) ? "missing" : "configured")}, " +
+    $"SnykOrgId={(string.IsNullOrWhiteSpace(syncOptions.SnykOrgId) ? "missing" : "configured")}, " +
+    $"GhasToken={(string.IsNullOrWhiteSpace(syncOptions.GhasToken) ? "missing" : "configured")}, " +
+    $"GithubToken={(string.IsNullOrWhiteSpace(syncOptions.GithubToken) ? "missing" : "configured")}");
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -112,6 +122,7 @@ SarifTools.StateService = sarifStateService;
 SarifTools.SnippetCache = snippetCacheService;
 SarifTools.SnippetWarmupService = snippetWarmupService;
 SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyService>();
+SarifTools.SetSyncOptions(syncOptions);
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
@@ -304,6 +315,17 @@ static bool TryGetProperty(JsonElement element, string propertyName, out JsonEle
 
     value = default;
     return false;
+}
+
+static SyncOptions NormalizeSyncOptions(SyncOptions? options)
+{
+    return new SyncOptions
+    {
+        SnykToken = options?.SnykToken?.Trim(),
+        SnykOrgId = options?.SnykOrgId?.Trim(),
+        GhasToken = options?.GhasToken?.Trim(),
+        GithubToken = options?.GithubToken?.Trim()
+    };
 }
 
 var localUiBaseUrl = app.Urls.FirstOrDefault(url =>

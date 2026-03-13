@@ -34,6 +34,7 @@ namespace Sarifintown.AgentEngine
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
         private static string _workspaceRoot = Directory.GetCurrentDirectory();
+        private static SyncOptions _syncOptions = new();
         private static ActiveScopeFilter _activeScope = new();
         private static string _paginationScopeKey = string.Empty;
         private static int _paginationNextOffset;
@@ -80,6 +81,22 @@ namespace Sarifintown.AgentEngine
                 _paginationScopeKey = string.Empty;
                 _paginationNextOffset = 0;
                 ResetDisplayIdMappings();
+            }
+        }
+
+        public static void SetSyncOptions(SyncOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(options);
+
+            lock (SyncRoot)
+            {
+                _syncOptions = new SyncOptions
+                {
+                    SnykToken = options.SnykToken?.Trim(),
+                    SnykOrgId = options.SnykOrgId?.Trim(),
+                    GhasToken = options.GhasToken?.Trim(),
+                    GithubToken = options.GithubToken?.Trim()
+                };
             }
         }
 
@@ -503,11 +520,12 @@ namespace Sarifintown.AgentEngine
         {
             var ledger = GetOrCreateLedgerService();
             var providers = GetSyncProviders();
+            var syncOptions = GetSyncOptions();
 
-            var snykToken = Environment.GetEnvironmentVariable("SNYK_TOKEN") ?? string.Empty;
-            var snykOrgId = Environment.GetEnvironmentVariable("SNYK_ORG_ID") ?? string.Empty;
-            var ghasToken = Environment.GetEnvironmentVariable("GHAS_TOKEN")
-                            ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+            var snykToken = syncOptions.SnykToken ?? string.Empty;
+            var snykOrgId = syncOptions.SnykOrgId ?? string.Empty;
+            var ghasToken = syncOptions.GhasToken
+                            ?? syncOptions.GithubToken
                             ?? string.Empty;
 
             IReadOnlyList<(string CompositeKey, LedgerEntry Entry)> entriesToSync;
@@ -744,6 +762,20 @@ namespace Sarifintown.AgentEngine
                 new SnykSyncProvider(httpClient),
                 new GhasSyncProvider()
             };
+        }
+
+        private static SyncOptions GetSyncOptions()
+        {
+            lock (SyncRoot)
+            {
+                return new SyncOptions
+                {
+                    SnykToken = _syncOptions.SnykToken,
+                    SnykOrgId = _syncOptions.SnykOrgId,
+                    GhasToken = _syncOptions.GhasToken,
+                    GithubToken = _syncOptions.GithubToken
+                };
+            }
         }
 
         private static string ResolveUpstreamState(string providerName, TriageDecisionState localState)
