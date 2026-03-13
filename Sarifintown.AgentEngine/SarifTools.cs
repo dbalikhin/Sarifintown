@@ -3,6 +3,8 @@ using ModelContextProtocol.Protocol;
 using Microsoft.Extensions.Options;
 using Sarifintown.Core;
 using Sarifintown.AgentEngine.Configuration;
+using Sarifintown.AgentEngine.Sync;
+using Sarifintown.AgentEngine.Sync.Snyk;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
@@ -23,6 +25,9 @@ namespace Sarifintown.AgentEngine
         internal static SnippetWarmupService? SnippetWarmupService { get; set; }
         internal static IPromptAssemblyService? PromptAssembly { get; set; }
         internal static TriageLedgerService? LedgerService { get; set; }
+        internal static IReadOnlyList<IUpstreamSyncProvider>? SyncProvidersOverride { get; set; }
+        internal static Func<HttpClient>? SyncHttpClientFactory { get; set; }
+        private static readonly HttpClient SharedSyncHttpClient = new();
         private static readonly object SyncRoot = new();
         public const string StateContextDelimiter = "===SARIF_STATE_CONTEXT===";
         private const int MaxEvidenceInspectCount = 25;
@@ -348,7 +353,7 @@ namespace Sarifintown.AgentEngine
 
             var now = DateTime.UtcNow;
             var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, author,
+                ledger, triagePayload, parsedDecision, reason, author,
                 humanReviewed: !isAiTriage,
                 llmReasoning, now, systemPromptUsed);
 
@@ -405,6 +410,7 @@ namespace Sarifintown.AgentEngine
         /// Builds ledger entries from a completed triage payload. Shared by SarifUpdate AI and human paths.
         /// </summary>
         private static async Task<List<(string CompositeKey, LedgerEntry Entry)>> BuildLedgerItemsAsync(
+            TriageLedgerService ledger,
             ScopedTriagePayload triagePayload,
             TriageDecisionState parsedDecision,
             string reason,
@@ -416,10 +422,23 @@ namespace Sarifintown.AgentEngine
         {
             var ledgerItems = new List<(string CompositeKey, LedgerEntry Entry)>();
 
+            var keysToLoad = new List<string>();
             foreach (var findingId in triagePayload.ModifiedFindingIds)
             {
                 var toolName = await ResolveToolNameForFindingAsync(findingId);
                 var compositeKey = TriageLedgerDocument.BuildCompositeKey(toolName, findingId);
+                keysToLoad.Add(compositeKey);
+            }
+
+            var existingEntries = (await ledger.GetByKeysAsync(keysToLoad))
+                .ToDictionary(k => k.CompositeKey, v => v.Entry, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var findingId in triagePayload.ModifiedFindingIds)
+            {
+                var toolName = await ResolveToolNameForFindingAsync(findingId);
+                var compositeKey = TriageLedgerDocument.BuildCompositeKey(toolName, findingId);
+
+                existingEntries.TryGetValue(compositeKey, out var existingEntry);
 
                 string filePath = string.Empty;
                 string ruleId = string.Empty;
@@ -432,8 +451,14 @@ namespace Sarifintown.AgentEngine
                     ruleId = evidence.Evidence.RuleId;
                 }
 
+                var upstreamProvider = ResolveUpstreamProviderName(toolName);
+
                 var entry = new LedgerEntry
                 {
+                    RecordId = existingEntry?.RecordId ?? Guid.NewGuid(),
+                    PartitionKey = existingEntry?.PartitionKey ?? BuildPartitionKey(toolName),
+                    UpstreamProvider = upstreamProvider,
+                    UpstreamState = ResolveUpstreamState(upstreamProvider, parsedDecision),
                     Metadata = new LedgerMetadata
                     {
                         FindingId = findingId,
@@ -477,6 +502,13 @@ namespace Sarifintown.AgentEngine
             string target = "pending")
         {
             var ledger = GetOrCreateLedgerService();
+            var providers = GetSyncProviders();
+
+            var snykToken = Environment.GetEnvironmentVariable("SNYK_TOKEN") ?? string.Empty;
+            var snykOrgId = Environment.GetEnvironmentVariable("SNYK_ORG_ID") ?? string.Empty;
+            var ghasToken = Environment.GetEnvironmentVariable("GHAS_TOKEN")
+                            ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+                            ?? string.Empty;
 
             IReadOnlyList<(string CompositeKey, LedgerEntry Entry)> entriesToSync;
             if (string.Equals(target, "pending", StringComparison.OrdinalIgnoreCase)
@@ -503,33 +535,122 @@ namespace Sarifintown.AgentEngine
             var now = DateTime.UtcNow;
             var syncedCount = 0;
             var failedCount = 0;
+            var pendingCount = 0;
+            var alreadySuppressedCount = 0;
+            var aborted = false;
             var syncedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var failedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var updatedItems = new List<(string CompositeKey, LedgerEntry Entry)>();
+            var findingsById = await LoadFindingsByIdAsync().ConfigureAwait(false);
 
             foreach (var (compositeKey, entry) in entriesToSync)
             {
+                var findingId = entry.Metadata.FindingId;
                 var platform = entry.Metadata.ToolName;
-                var (success, errorMessage) = await TrySyncToUpstreamAsync(entry);
+
+                if (!findingsById.TryGetValue(findingId, out var findingEnvelope))
+                {
+                    var missingFindingSync = entry.UpstreamSync with
+                    {
+                        Status = UpstreamSyncStatus.Failed,
+                        LastSyncAttempt = now,
+                        ErrorMessage = "Finding was not found in current SARIF state."
+                    };
+
+                    updatedItems.Add((compositeKey, entry with
+                    {
+                        UpstreamSync = missingFindingSync
+                    }));
+
+                    failedCount++;
+                    failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                    continue;
+                }
+
+                if (HasAcceptedSuppression(findingEnvelope))
+                {
+                    var acceptedSync = entry.UpstreamSync with
+                    {
+                        Status = UpstreamSyncStatus.Synced,
+                        LastSyncAttempt = now,
+                        ErrorMessage = null
+                    };
+
+                    updatedItems.Add((compositeKey, entry with
+                    {
+                        UpstreamState = "accepted",
+                        UpstreamSync = acceptedSync
+                    }));
+
+                    syncedCount++;
+                    alreadySuppressedCount++;
+                    syncedByPlatform[platform] = syncedByPlatform.GetValueOrDefault(platform) + 1;
+                    continue;
+                }
+
+                var toolDriverName = findingEnvelope.Run?.Tool?.Driver?.Name ?? platform;
+                var provider = providers.FirstOrDefault(candidate => candidate.CanHandle(toolDriverName));
+                if (provider == null)
+                {
+                    var unsupportedSync = entry.UpstreamSync with
+                    {
+                        Status = UpstreamSyncStatus.Failed,
+                        LastSyncAttempt = now,
+                        ErrorMessage = $"Unsupported platform: '{toolDriverName}'. No sync adapter registered."
+                    };
+
+                    updatedItems.Add((compositeKey, entry with { UpstreamSync = unsupportedSync }));
+                    failedCount++;
+                    failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                    continue;
+                }
+
+                var syncContext = provider.ProviderName switch
+                {
+                    "Snyk" => new SyncContext(snykToken, snykOrgId),
+                    "GitHubAdvancedSecurity" => new SyncContext(ghasToken, string.Empty),
+                    _ => new SyncContext(string.Empty, string.Empty)
+                };
+
+                var result = await provider
+                    .SyncTriageAsync(entry, findingEnvelope.Result, syncContext, CancellationToken.None)
+                    .ConfigureAwait(false);
 
                 var updatedSync = entry.UpstreamSync with
                 {
-                    Status = success ? UpstreamSyncStatus.Synced : UpstreamSyncStatus.Failed,
+                    Status = result.Status,
                     LastSyncAttempt = now,
-                    ErrorMessage = success ? null : errorMessage
+                    ErrorMessage = result.ErrorMessage
                 };
 
-                updatedItems.Add((compositeKey, entry with { UpstreamSync = updatedSync }));
+                var updatedEntry = entry with
+                {
+                    UpstreamProvider = provider.ProviderName,
+                    UpstreamState = ResolveUpstreamState(provider.ProviderName, entry.TriageDecision.State),
+                    UpstreamSync = updatedSync
+                };
 
-                if (success)
+                updatedItems.Add((compositeKey, updatedEntry));
+
+                if (result.Status == UpstreamSyncStatus.Synced)
                 {
                     syncedCount++;
                     syncedByPlatform[platform] = syncedByPlatform.GetValueOrDefault(platform) + 1;
+                }
+                else if (result.Status == UpstreamSyncStatus.Pending)
+                {
+                    pendingCount++;
                 }
                 else
                 {
                     failedCount++;
                     failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                }
+
+                if (result.ShouldAbortBatch)
+                {
+                    aborted = true;
+                    break;
                 }
             }
 
@@ -546,6 +667,16 @@ namespace Sarifintown.AgentEngine
                 }
             }
 
+            if (alreadySuppressedCount > 0)
+            {
+                lines.Add($"🟰 **{alreadySuppressedCount}** entries already had accepted SARIF suppressions and were marked synced.");
+            }
+
+            if (pendingCount > 0)
+            {
+                lines.Add($"⏸️ **{pendingCount}** entries remain pending (for example, rate-limited sync attempts).");
+            }
+
             if (failedCount > 0)
             {
                 lines.Add($"❌ **{failedCount}** entries failed to sync.");
@@ -558,7 +689,13 @@ namespace Sarifintown.AgentEngine
                 lines.Add("Check the triage ledger for error details. Fix credentials and retry with `sarif_sync`.");
             }
 
-            if (syncedCount == 0 && failedCount == 0)
+            if (aborted)
+            {
+                lines.Add(string.Empty);
+                lines.Add("⚠️ Batch processing stopped early due to an authentication/permissions failure.");
+            }
+
+            if (syncedCount == 0 && failedCount == 0 && pendingCount == 0)
             {
                 lines.Add("ℹ️ No entries were processed.");
             }
@@ -570,47 +707,105 @@ namespace Sarifintown.AgentEngine
             return CreatePlainTextResult(syncOutput);
         }
 
-        /// <summary>
-        /// Attempts to sync a single ledger entry to its upstream vendor platform.
-        /// Returns (success, errorMessage).
-        /// </summary>
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToUpstreamAsync(LedgerEntry entry)
+        private static IReadOnlyDictionary<string, TriageFindingEnvelope> LoadFindingsByIdAsyncResult(IReadOnlyList<TriageFindingEnvelope> findings)
         {
-            ArgumentNullException.ThrowIfNull(entry);
+            return findings
+                .GroupBy(item => item.FindingId, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .ToDictionary(item => item.FindingId, item => item, StringComparer.Ordinal);
+        }
 
-            var platform = entry.Metadata.ToolName.Trim().ToLowerInvariant();
+        private static async Task<IReadOnlyDictionary<string, TriageFindingEnvelope>> LoadFindingsByIdAsync()
+        {
+            var stateService = GetOrCreateStateService();
+            var findings = await stateService.GetFindingsAsync().ConfigureAwait(false);
+            return LoadFindingsByIdAsyncResult(findings);
+        }
 
-            return platform switch
+        private static bool HasAcceptedSuppression(TriageFindingEnvelope findingEnvelope)
+        {
+            ArgumentNullException.ThrowIfNull(findingEnvelope);
+
+            var result = findingEnvelope.Result;
+            return result.Suppressions != null
+                   && result.Suppressions.Any(s => string.Equals(s.Status, "accepted", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static IReadOnlyList<IUpstreamSyncProvider> GetSyncProviders()
+        {
+            if (SyncProvidersOverride != null && SyncProvidersOverride.Count > 0)
             {
-                "snyk" or "snyk code" => TrySyncToSnykAsync(entry),
-                "github-advanced-security" or "codeql" or "github" => TrySyncToGhasAsync(entry),
-                _ => Task.FromResult<(bool, string?)>((false, $"Unsupported platform: '{entry.Metadata.ToolName}'. No sync adapter registered."))
+                return SyncProvidersOverride;
+            }
+
+            var httpClient = SyncHttpClientFactory?.Invoke() ?? SharedSyncHttpClient;
+            return new IUpstreamSyncProvider[]
+            {
+                new SnykSyncProvider(httpClient),
+                new GhasSyncProvider()
             };
         }
 
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToSnykAsync(LedgerEntry entry)
+        private static string ResolveUpstreamState(string providerName, TriageDecisionState localState)
         {
-            var token = Environment.GetEnvironmentVariable("SNYK_TOKEN");
-            if (string.IsNullOrWhiteSpace(token))
+            if (string.Equals(providerName, "Snyk", StringComparison.OrdinalIgnoreCase))
             {
-                return Task.FromResult<(bool, string?)>((false, "SNYK_TOKEN environment variable is not set."));
+                return SnykSyncProvider.TryMapDecisionToReasonType(localState, out var reasonType, out _)
+                    ? reasonType
+                    : "local-only";
             }
 
-            // Stub: actual Snyk API integration will be implemented when vendor SDK is available.
-            return Task.FromResult<(bool, string?)>((true, null));
+            return localState switch
+            {
+                TriageDecisionState.FalsePositive => "false_positive",
+                TriageDecisionState.WontFix => "wont_fix",
+                TriageDecisionState.TestCode => "test_code",
+                TriageDecisionState.Confirmed => "confirmed",
+                TriageDecisionState.Mitigated => "mitigated",
+                _ => string.Empty
+            };
         }
 
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToGhasAsync(LedgerEntry entry)
+        private static string ResolveUpstreamProviderName(string toolName)
         {
-            var token = Environment.GetEnvironmentVariable("GHAS_TOKEN")
-                        ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
-            if (string.IsNullOrWhiteSpace(token))
+            if (string.IsNullOrWhiteSpace(toolName))
             {
-                return Task.FromResult<(bool, string?)>((false, "GHAS_TOKEN (or GITHUB_TOKEN) environment variable is not set."));
+                return "unknown";
             }
 
-            // Stub: actual GitHub Advanced Security API integration will be implemented when vendor SDK is available.
-            return Task.FromResult<(bool, string?)>((true, null));
+            var normalized = toolName.Trim().ToLowerInvariant();
+
+            if (normalized.Contains("snyk", StringComparison.Ordinal))
+            {
+                return "Snyk";
+            }
+
+            if (normalized.Contains("codeql", StringComparison.Ordinal)
+                || normalized.Contains("github", StringComparison.Ordinal))
+            {
+                return "GitHubAdvancedSecurity";
+            }
+
+            return "unknown";
+        }
+
+        private static string BuildPartitionKey(string toolName)
+        {
+            var organization = Environment.GetEnvironmentVariable("SNYK_ORG_ID") ?? "local";
+            string workspaceRoot;
+            lock (SyncRoot)
+            {
+                workspaceRoot = _workspaceRoot;
+            }
+
+            var repository = Path.GetFileName(workspaceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(repository))
+            {
+                repository = "workspace";
+            }
+
+            var provider = string.IsNullOrWhiteSpace(toolName) ? "unknown" : toolName.Trim().ToLowerInvariant();
+            return $"{organization}|{repository}|{provider}";
         }
 
         private static bool TryParseTriageDecisionState(string state, out TriageDecisionState parsed)
@@ -663,14 +858,46 @@ namespace Sarifintown.AgentEngine
             return service;
         }
 
+        private static SarifStateService GetOrCreateStateService()
+        {
+            var stateService = StateService;
+            if (stateService != null)
+            {
+                return stateService;
+            }
+
+            if (FileReader == null)
+            {
+                throw new InvalidOperationException("Core engines are not initialized.");
+            }
+
+            List<string> discoveredFiles;
+            string workspaceRoot;
+
+            lock (SyncRoot)
+            {
+                discoveredFiles = _discoveredSarifFiles.ToList();
+                workspaceRoot = _workspaceRoot;
+            }
+
+            stateService = new SarifStateService(
+                FileReader,
+                Options.Create(new SarifOptions
+                {
+                    Strategy = PreloadStrategy.LatestPerTool,
+                    EnableSnippetPreload = true
+                }),
+                workspaceRoot,
+                discoveredFiles);
+
+            StateService = stateService;
+            return stateService;
+        }
+
         private static async Task<string> ResolveToolNameForFindingAsync(
             string findingId)
         {
-            var stateService = StateService;
-            if (stateService == null)
-            {
-                return "unknown-tool";
-            }
+            var stateService = GetOrCreateStateService();
 
             var findings = await stateService.GetFindingsAsync();
             var finding = findings.FirstOrDefault(f => string.Equals(f.FindingId, findingId, StringComparison.Ordinal));
@@ -1966,27 +2193,15 @@ namespace Sarifintown.AgentEngine
                 throw new InvalidOperationException("Core engines are not initialized.");
             }
 
-            List<string> discoveredFiles;
             string workspaceRoot;
-            var stateService = StateService;
+            var stateService = GetOrCreateStateService();
             var snippetCache = SnippetCache;
             var snippetWarmupService = SnippetWarmupService;
 
             lock (SyncRoot)
             {
-                discoveredFiles = _discoveredSarifFiles.ToList();
                 workspaceRoot = _workspaceRoot;
             }
-
-            stateService ??= new SarifStateService(
-                FileReader,
-                Options.Create(new SarifOptions
-                {
-                    Strategy = PreloadStrategy.LatestPerTool,
-                    EnableSnippetPreload = true
-                }),
-                workspaceRoot,
-                discoveredFiles);
 
             snippetCache ??= new SnippetCacheService();
 

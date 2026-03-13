@@ -351,6 +351,9 @@ namespace Sarifintown.AgentEngine.Tests
             SetInternalSarifToolsProperty("SnippetCache", null);
             SetInternalSarifToolsProperty("SnippetWarmupService", null);
             SetInternalSarifToolsProperty("PromptAssembly", null);
+            SetInternalSarifToolsProperty("LedgerService", null);
+            SetInternalSarifToolsProperty("SyncProvidersOverride", null);
+            SetInternalSarifToolsProperty("SyncHttpClientFactory", null);
             SarifTools.SetDiscoveredSarifFiles(Array.Empty<string>());
             SarifTools.SetLocalUiBaseUrl(string.Empty);
             SarifTools.SetWorkspaceRoot(Directory.GetCurrentDirectory());
@@ -1205,6 +1208,122 @@ namespace Sarifintown.AgentEngine.Tests
                 var reviewText = ((TextContentBlock)reviewResult.Content[0]).Text;
                 Assert.That(reviewText, Contains.Substring("### Finding `1`"));
                 Assert.That(reviewText, Contains.Substring("### Finding `2`"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifSync_WithAcceptedSarifSuppression_MarksEntrySyncedWithoutProviderCall()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-suppression.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-SUPPRESS",
+                      "level": "error",
+                      "message": { "text": "already suppressed" },
+                      "suppressions": [
+                        {
+                          "kind": "external",
+                          "status": "accepted"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "false_positive", reason: "sync-check");
+
+                var syncResult = await SarifTools.SarifSync();
+                var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
+
+                Assert.That(syncText, Contains.Substring("already had accepted SARIF suppressions"));
+
+                var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
+                var ledgerJson = await File.ReadAllTextAsync(ledgerPath);
+                using var ledgerDoc = JsonDocument.Parse(ledgerJson);
+                var entry = ledgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("synced"));
+                Assert.That(entry.GetProperty("upstream_state").GetString(), Is.EqualTo("accepted"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifSync_WithConfirmedState_SkipsUpstreamCallAndMarksSyncedWithoutTokens()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-confirmed-local.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-CONFIRMED",
+                      "level": "error",
+                      "message": { "text": "confirmed local state" }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "confirmed", reason: "confirmed-local");
+
+                var syncResult = await SarifTools.SarifSync();
+                var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
+
+                Assert.That(syncText, Contains.Substring("entries synced successfully"));
+
+                var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
+                var ledgerJson = await File.ReadAllTextAsync(ledgerPath);
+                using var ledgerDoc = JsonDocument.Parse(ledgerJson);
+                var entry = ledgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("synced"));
+                Assert.That(entry.GetProperty("upstream_state").GetString(), Is.EqualTo("local-only"));
             }
             finally
             {

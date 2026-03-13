@@ -119,6 +119,18 @@ internal sealed record LedgerUpstreamSync
 /// </summary>
 internal sealed record LedgerEntry
 {
+    [JsonPropertyName("record_id")]
+    public Guid RecordId { get; init; } = Guid.NewGuid();
+
+    [JsonPropertyName("partition_key")]
+    public string PartitionKey { get; init; } = string.Empty;
+
+    [JsonPropertyName("upstream_provider")]
+    public string UpstreamProvider { get; init; } = string.Empty;
+
+    [JsonPropertyName("upstream_state")]
+    public string UpstreamState { get; init; } = string.Empty;
+
     [JsonPropertyName("metadata")]
     public LedgerMetadata Metadata { get; init; } = new();
 
