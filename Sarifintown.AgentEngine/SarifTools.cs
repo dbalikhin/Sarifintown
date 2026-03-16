@@ -3,6 +3,8 @@ using ModelContextProtocol.Protocol;
 using Microsoft.Extensions.Options;
 using Sarifintown.Core;
 using Sarifintown.AgentEngine.Configuration;
+using Sarifintown.AgentEngine.Sync;
+using Sarifintown.AgentEngine.Sync.Snyk;
 using Sarifintown.Helpers;
 using Sarifintown.Models;
 using System.ComponentModel;
@@ -23,12 +25,16 @@ namespace Sarifintown.AgentEngine
         internal static SnippetWarmupService? SnippetWarmupService { get; set; }
         internal static IPromptAssemblyService? PromptAssembly { get; set; }
         internal static TriageLedgerService? LedgerService { get; set; }
+        internal static IReadOnlyList<IUpstreamSyncProvider>? SyncProvidersOverride { get; set; }
+        internal static Func<HttpClient>? SyncHttpClientFactory { get; set; }
+        private static readonly HttpClient SharedSyncHttpClient = new();
         private static readonly object SyncRoot = new();
         public const string StateContextDelimiter = "===SARIF_STATE_CONTEXT===";
         private const int MaxEvidenceInspectCount = 25;
         private static List<string> _discoveredSarifFiles = new();
         private static string _localUiBaseUrl = string.Empty;
         private static string _workspaceRoot = Directory.GetCurrentDirectory();
+        private static SyncOptions _syncOptions = new();
         private static ActiveScopeFilter _activeScope = new();
         private static string _paginationScopeKey = string.Empty;
         private static int _paginationNextOffset;
@@ -75,6 +81,22 @@ namespace Sarifintown.AgentEngine
                 _paginationScopeKey = string.Empty;
                 _paginationNextOffset = 0;
                 ResetDisplayIdMappings();
+            }
+        }
+
+        public static void SetSyncOptions(SyncOptions options)
+        {
+            ArgumentNullException.ThrowIfNull(options);
+
+            lock (SyncRoot)
+            {
+                _syncOptions = new SyncOptions
+                {
+                    SnykToken = options.SnykToken?.Trim(),
+                    SnykOrgId = options.SnykOrgId?.Trim(),
+                    GitHubToken = options.GitHubToken?.Trim(),
+                    GitHubRepo = options.GitHubRepo?.Trim()
+                };
             }
         }
 
@@ -348,7 +370,7 @@ namespace Sarifintown.AgentEngine
 
             var now = DateTime.UtcNow;
             var ledgerItems = await BuildLedgerItemsAsync(
-                triagePayload, parsedDecision, reason, author,
+                ledger, triagePayload, parsedDecision, reason, author,
                 humanReviewed: !isAiTriage,
                 llmReasoning, now, systemPromptUsed);
 
@@ -405,6 +427,7 @@ namespace Sarifintown.AgentEngine
         /// Builds ledger entries from a completed triage payload. Shared by SarifUpdate AI and human paths.
         /// </summary>
         private static async Task<List<(string CompositeKey, LedgerEntry Entry)>> BuildLedgerItemsAsync(
+            TriageLedgerService ledger,
             ScopedTriagePayload triagePayload,
             TriageDecisionState parsedDecision,
             string reason,
@@ -414,12 +437,26 @@ namespace Sarifintown.AgentEngine
             DateTime timestamp,
             string? systemPromptUsed)
         {
+            var syncOptions = GetSyncOptions();
             var ledgerItems = new List<(string CompositeKey, LedgerEntry Entry)>();
+
+            var keysToLoad = new List<string>();
+            foreach (var findingId in triagePayload.ModifiedFindingIds)
+            {
+                var toolName = await ResolveToolNameForFindingAsync(findingId);
+                var compositeKey = TriageLedgerDocument.BuildCompositeKey(toolName, findingId);
+                keysToLoad.Add(compositeKey);
+            }
+
+            var existingEntries = (await ledger.GetByKeysAsync(keysToLoad))
+                .ToDictionary(k => k.CompositeKey, v => v.Entry, StringComparer.OrdinalIgnoreCase);
 
             foreach (var findingId in triagePayload.ModifiedFindingIds)
             {
                 var toolName = await ResolveToolNameForFindingAsync(findingId);
                 var compositeKey = TriageLedgerDocument.BuildCompositeKey(toolName, findingId);
+
+                existingEntries.TryGetValue(compositeKey, out var existingEntry);
 
                 string filePath = string.Empty;
                 string ruleId = string.Empty;
@@ -432,8 +469,14 @@ namespace Sarifintown.AgentEngine
                     ruleId = evidence.Evidence.RuleId;
                 }
 
+                var upstreamProvider = ResolveUpstreamProviderName(toolName);
+
                 var entry = new LedgerEntry
                 {
+                    RecordId = existingEntry?.RecordId ?? Guid.NewGuid(),
+                    PartitionKey = existingEntry?.PartitionKey ?? BuildPartitionKey(toolName, syncOptions),
+                    UpstreamProvider = upstreamProvider,
+                    UpstreamState = ResolveUpstreamState(upstreamProvider, parsedDecision),
                     Metadata = new LedgerMetadata
                     {
                         FindingId = findingId,
@@ -477,6 +520,8 @@ namespace Sarifintown.AgentEngine
             string target = "pending")
         {
             var ledger = GetOrCreateLedgerService();
+            var providers = GetSyncProviders();
+            var syncOptions = GetSyncOptions();
 
             IReadOnlyList<(string CompositeKey, LedgerEntry Entry)> entriesToSync;
             if (string.Equals(target, "pending", StringComparison.OrdinalIgnoreCase)
@@ -501,67 +546,179 @@ namespace Sarifintown.AgentEngine
             }
 
             var now = DateTime.UtcNow;
-            var syncedCount = 0;
+            var newSyncedCount = 0;
+            var idempotentSyncedCount = 0;
+            var skippedCount = 0;
             var failedCount = 0;
-            var syncedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var pendingCount = 0;
+            var aborted = false;
+            var newSyncedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var idempotentByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var skippedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var failedByPlatform = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var updatedItems = new List<(string CompositeKey, LedgerEntry Entry)>();
+            var findingsById = await LoadFindingsByIdAsync().ConfigureAwait(false);
+
+            string syncLogPath;
+            lock (SyncRoot)
+            {
+                syncLogPath = Path.Combine(Path.GetFullPath(_workspaceRoot), ".sarif", "sarif_sync_http.log");
+            }
+
+            await AppendToSyncLogAsync(
+                $"[{now:O}] Sync batch started | target={target} | entries={entriesToSync.Count} | logFile={syncLogPath}{Environment.NewLine}").ConfigureAwait(false);
 
             foreach (var (compositeKey, entry) in entriesToSync)
             {
-                var platform = entry.Metadata.ToolName;
-                var (success, errorMessage) = await TrySyncToUpstreamAsync(entry);
+                var findingId = entry.Metadata.FindingId;
+                var platform = FormatPlatformLabel(entry.Metadata.ToolName);
+
+                if (!findingsById.TryGetValue(findingId, out var findingEnvelope))
+                {
+                    var missingFindingSync = entry.UpstreamSync with
+                    {
+                        Status = UpstreamSyncStatus.Failed,
+                        LastSyncAttempt = now,
+                        ErrorMessage = "Finding was not found in current SARIF state."
+                    };
+
+                    updatedItems.Add((compositeKey, entry with
+                    {
+                        UpstreamSync = missingFindingSync
+                    }));
+
+                    failedCount++;
+                    failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                    await AppendToSyncLogAsync(
+                        $"  [{platform}] {findingId} -> FAILED (finding not found in SARIF state, no HTTP call){Environment.NewLine}").ConfigureAwait(false);
+                    continue;
+                }
+
+                var toolDriverName = findingEnvelope.Run?.Tool?.Driver?.Name ?? platform;
+                var provider = providers.FirstOrDefault(candidate => candidate.CanHandle(toolDriverName));
+                if (provider == null)
+                {
+                    var unsupportedSync = entry.UpstreamSync with
+                    {
+                        Status = UpstreamSyncStatus.Failed,
+                        LastSyncAttempt = now,
+                        ErrorMessage = $"Unsupported platform: '{toolDriverName}'. No sync adapter registered."
+                    };
+
+                    updatedItems.Add((compositeKey, entry with { UpstreamSync = unsupportedSync }));
+                    failedCount++;
+                    failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
+                    await AppendToSyncLogAsync(
+                        $"  [{platform}] {findingId} -> FAILED (no sync adapter for '{toolDriverName}', no HTTP call){Environment.NewLine}").ConfigureAwait(false);
+                    continue;
+                }
+
+                var result = await provider
+                    .SyncTriageAsync(entry, findingEnvelope.Result, syncOptions, CancellationToken.None)
+                    .ConfigureAwait(false);
 
                 var updatedSync = entry.UpstreamSync with
                 {
-                    Status = success ? UpstreamSyncStatus.Synced : UpstreamSyncStatus.Failed,
+                    Status = result.Status,
                     LastSyncAttempt = now,
-                    ErrorMessage = success ? null : errorMessage
+                    ErrorMessage = result.ErrorMessage
                 };
 
-                updatedItems.Add((compositeKey, entry with { UpstreamSync = updatedSync }));
-
-                if (success)
+                var updatedEntry = entry with
                 {
-                    syncedCount++;
-                    syncedByPlatform[platform] = syncedByPlatform.GetValueOrDefault(platform) + 1;
+                    UpstreamProvider = provider.ProviderName,
+                    UpstreamState = ResolveUpstreamState(provider.ProviderName, entry.TriageDecision.State),
+                    UpstreamSync = updatedSync
+                };
+
+                updatedItems.Add((compositeKey, updatedEntry));
+
+                if (result.Status == UpstreamSyncStatus.Synced)
+                {
+                    if (IsIdempotentSync(result))
+                    {
+                        idempotentSyncedCount++;
+                        idempotentByPlatform[platform] = idempotentByPlatform.GetValueOrDefault(platform) + 1;
+                    }
+                    else
+                    {
+                        newSyncedCount++;
+                        newSyncedByPlatform[platform] = newSyncedByPlatform.GetValueOrDefault(platform) + 1;
+                    }
+                }
+                else if (result.Status == UpstreamSyncStatus.Skipped)
+                {
+                    skippedCount++;
+                    skippedByPlatform[platform] = skippedByPlatform.GetValueOrDefault(platform) + 1;
+                }
+                else if (result.Status == UpstreamSyncStatus.Pending)
+                {
+                    pendingCount++;
                 }
                 else
                 {
                     failedCount++;
                     failedByPlatform[platform] = failedByPlatform.GetValueOrDefault(platform) + 1;
                 }
+
+                await AppendToSyncLogAsync(
+                    $"  [{platform}] {findingId} | state={entry.TriageDecision.State} | provider={provider.ProviderName} -> {result.Status}{(string.IsNullOrWhiteSpace(result.ErrorMessage) ? " (HTTP call made)" : $" ({result.ErrorMessage})")}{Environment.NewLine}").ConfigureAwait(false);
+
+                if (result.ShouldAbortBatch)
+                {
+                    aborted = true;
+                    break;
+                }
             }
 
             await ledger.UpsertAsync(updatedItems);
 
+            await AppendToSyncLogAsync(
+                $"[{DateTimeOffset.UtcNow:O}] Sync batch completed | synced={newSyncedCount} | idempotent={idempotentSyncedCount} | skipped={skippedCount} | failed={failedCount} | pending={pendingCount} | aborted={aborted}{Environment.NewLine}{new string('-', 80)}{Environment.NewLine}").ConfigureAwait(false);
+
             var lines = new List<string> { "## Sync Results", string.Empty };
 
-            if (syncedCount > 0)
+            lines.Add($"✅ **{newSyncedCount}** entries synced successfully.");
+            foreach (var (platform, count) in newSyncedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
             {
-                lines.Add($"✅ **{syncedCount}** entries synced successfully.");
-                foreach (var (platform, count) in syncedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
-                {
-                    lines.Add($"  - {platform}: {count}");
-                }
+                lines.Add($"  - {platform}: {count}");
             }
 
-            if (failedCount > 0)
+            lines.Add(string.Empty);
+            lines.Add($"⏭️ **{idempotentSyncedCount}** entries already ignored upstream (HTTP 409 — idempotent).");
+            foreach (var (platform, count) in idempotentByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
             {
-                lines.Add($"❌ **{failedCount}** entries failed to sync.");
-                foreach (var (platform, count) in failedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
-                {
-                    lines.Add($"  - {platform}: {count}");
-                }
+                lines.Add($"  - {platform}: {count}");
+            }
 
+            lines.Add(string.Empty);
+            lines.Add($"🚫 **{skippedCount}** entries skipped (not applicable for this provider).");
+            foreach (var (platform, count) in skippedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                lines.Add($"  - {platform}: {count}");
+            }
+
+            if (pendingCount > 0)
+            {
                 lines.Add(string.Empty);
-                lines.Add("Check the triage ledger for error details. Fix credentials and retry with `sarif_sync`.");
+                lines.Add($"⏸️ **{pendingCount}** entries remain pending (for example, rate-limited sync attempts).");
             }
 
-            if (syncedCount == 0 && failedCount == 0)
+            lines.Add(string.Empty);
+            lines.Add($"❌ **{failedCount}** entries failed to sync.");
+            foreach (var (platform, count) in failedByPlatform.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
             {
-                lines.Add("ℹ️ No entries were processed.");
+                lines.Add($"  - {platform}: {count}");
             }
+
+            if (aborted)
+            {
+                lines.Add(string.Empty);
+                lines.Add("⚠️ Batch processing stopped early due to an authentication/permissions failure.");
+            }
+
+            lines.Add(string.Empty);
+            lines.Add("*For full HTTP payloads and error details, inspect `.sarif/sarif_sync_http.log`.*");
 
             var syncOutput = string.Join(Environment.NewLine, lines);
             await AppendToExecutionLogAsync("sarif_sync",
@@ -570,47 +727,135 @@ namespace Sarifintown.AgentEngine
             return CreatePlainTextResult(syncOutput);
         }
 
-        /// <summary>
-        /// Attempts to sync a single ledger entry to its upstream vendor platform.
-        /// Returns (success, errorMessage).
-        /// </summary>
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToUpstreamAsync(LedgerEntry entry)
+        private static IReadOnlyDictionary<string, TriageFindingEnvelope> LoadFindingsByIdAsyncResult(IReadOnlyList<TriageFindingEnvelope> findings)
         {
-            ArgumentNullException.ThrowIfNull(entry);
+            return findings
+                .GroupBy(item => item.FindingId, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .ToDictionary(item => item.FindingId, item => item, StringComparer.Ordinal);
+        }
 
-            var platform = entry.Metadata.ToolName.Trim().ToLowerInvariant();
+        private static async Task<IReadOnlyDictionary<string, TriageFindingEnvelope>> LoadFindingsByIdAsync()
+        {
+            var stateService = GetOrCreateStateService();
+            var findings = await stateService.GetFindingsAsync().ConfigureAwait(false);
+            return LoadFindingsByIdAsyncResult(findings);
+        }
 
-            return platform switch
+        private static bool IsIdempotentSync(SyncOperationResult result)
+        {
+            return result.IsSuccess
+                   && result.Status == UpstreamSyncStatus.Synced
+                   && !string.IsNullOrWhiteSpace(result.ErrorMessage)
+                   && result.ErrorMessage.StartsWith("HTTP 409", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string FormatPlatformLabel(string platform)
+        {
+            if (string.IsNullOrWhiteSpace(platform))
             {
-                "snyk" or "snyk code" => TrySyncToSnykAsync(entry),
-                "github-advanced-security" or "codeql" or "github" => TrySyncToGhasAsync(entry),
-                _ => Task.FromResult<(bool, string?)>((false, $"Unsupported platform: '{entry.Metadata.ToolName}'. No sync adapter registered."))
+                return "unknown";
+            }
+
+            return platform.Trim().ToLowerInvariant();
+        }
+
+        private static IReadOnlyList<IUpstreamSyncProvider> GetSyncProviders()
+        {
+            if (SyncProvidersOverride != null && SyncProvidersOverride.Count > 0)
+            {
+                return SyncProvidersOverride;
+            }
+
+            var httpClient = SyncHttpClientFactory?.Invoke() ?? SharedSyncHttpClient;
+            return new IUpstreamSyncProvider[]
+            {
+                new SnykSyncProvider(httpClient),
+                new GhasSyncProvider()
             };
         }
 
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToSnykAsync(LedgerEntry entry)
+        private static SyncOptions GetSyncOptions()
         {
-            var token = Environment.GetEnvironmentVariable("SNYK_TOKEN");
-            if (string.IsNullOrWhiteSpace(token))
+            lock (SyncRoot)
             {
-                return Task.FromResult<(bool, string?)>((false, "SNYK_TOKEN environment variable is not set."));
+                return new SyncOptions
+                {
+                    SnykToken = _syncOptions.SnykToken,
+                    SnykOrgId = _syncOptions.SnykOrgId,
+                    GitHubToken = _syncOptions.GitHubToken,
+                    GitHubRepo = _syncOptions.GitHubRepo
+                };
             }
-
-            // Stub: actual Snyk API integration will be implemented when vendor SDK is available.
-            return Task.FromResult<(bool, string?)>((true, null));
         }
 
-        private static Task<(bool Success, string? ErrorMessage)> TrySyncToGhasAsync(LedgerEntry entry)
+        private static string ResolveUpstreamState(string providerName, TriageDecisionState localState)
         {
-            var token = Environment.GetEnvironmentVariable("GHAS_TOKEN")
-                        ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
-            if (string.IsNullOrWhiteSpace(token))
+            if (string.Equals(providerName, "Snyk", StringComparison.OrdinalIgnoreCase))
             {
-                return Task.FromResult<(bool, string?)>((false, "GHAS_TOKEN (or GITHUB_TOKEN) environment variable is not set."));
+                return SnykSyncProvider.TryMapDecisionToReasonType(localState, out var reasonType, out _)
+                    ? reasonType
+                    : "local-only";
             }
 
-            // Stub: actual GitHub Advanced Security API integration will be implemented when vendor SDK is available.
-            return Task.FromResult<(bool, string?)>((true, null));
+            return localState switch
+            {
+                TriageDecisionState.FalsePositive => "false_positive",
+                TriageDecisionState.WontFix => "wont_fix",
+                TriageDecisionState.TestCode => "test_code",
+                TriageDecisionState.Confirmed => "confirmed",
+                TriageDecisionState.Mitigated => "mitigated",
+                _ => string.Empty
+            };
+        }
+
+        private static string ResolveUpstreamProviderName(string toolName)
+        {
+            if (string.IsNullOrWhiteSpace(toolName))
+            {
+                return "unknown";
+            }
+
+            var normalized = toolName.Trim().ToLowerInvariant();
+
+            if (normalized.Contains("snyk", StringComparison.Ordinal))
+            {
+                return "Snyk";
+            }
+
+            if (normalized.Contains("codeql", StringComparison.Ordinal)
+                || normalized.Contains("github", StringComparison.Ordinal))
+            {
+                return "GitHubAdvancedSecurity";
+            }
+
+            return "unknown";
+        }
+
+        private static string BuildPartitionKey(string toolName, SyncOptions syncOptions)
+        {
+            ArgumentNullException.ThrowIfNull(syncOptions);
+
+            var organization = syncOptions.SnykOrgId;
+            if (string.IsNullOrWhiteSpace(organization))
+            {
+                organization = "local";
+            }
+
+            string workspaceRoot;
+            lock (SyncRoot)
+            {
+                workspaceRoot = _workspaceRoot;
+            }
+
+            var repository = Path.GetFileName(workspaceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(repository))
+            {
+                repository = "workspace";
+            }
+
+            var provider = string.IsNullOrWhiteSpace(toolName) ? "unknown" : toolName.Trim().ToLowerInvariant();
+            return $"{organization}|{repository}|{provider}";
         }
 
         private static bool TryParseTriageDecisionState(string state, out TriageDecisionState parsed)
@@ -663,14 +908,46 @@ namespace Sarifintown.AgentEngine
             return service;
         }
 
+        private static SarifStateService GetOrCreateStateService()
+        {
+            var stateService = StateService;
+            if (stateService != null)
+            {
+                return stateService;
+            }
+
+            if (FileReader == null)
+            {
+                throw new InvalidOperationException("Core engines are not initialized.");
+            }
+
+            List<string> discoveredFiles;
+            string workspaceRoot;
+
+            lock (SyncRoot)
+            {
+                discoveredFiles = _discoveredSarifFiles.ToList();
+                workspaceRoot = _workspaceRoot;
+            }
+
+            stateService = new SarifStateService(
+                FileReader,
+                Options.Create(new SarifOptions
+                {
+                    Strategy = PreloadStrategy.LatestPerTool,
+                    EnableSnippetPreload = true
+                }),
+                workspaceRoot,
+                discoveredFiles);
+
+            StateService = stateService;
+            return stateService;
+        }
+
         private static async Task<string> ResolveToolNameForFindingAsync(
             string findingId)
         {
-            var stateService = StateService;
-            if (stateService == null)
-            {
-                return "unknown-tool";
-            }
+            var stateService = GetOrCreateStateService();
 
             var findings = await stateService.GetFindingsAsync();
             var finding = findings.FirstOrDefault(f => string.Equals(f.FindingId, findingId, StringComparison.Ordinal));
@@ -1756,6 +2033,54 @@ namespace Sarifintown.AgentEngine
         }
 
         /// <summary>
+        /// Appends a diagnostic entry to the sync HTTP log for developer observability.
+        /// Also writes to stderr so MCP hosts (VS Code, etc.) can surface sync diagnostics.
+        /// File-write failures are logged to stderr rather than silently swallowed.
+        /// </summary>
+        private static async Task AppendToSyncLogAsync(string message)
+        {
+            // Always write to stderr so MCP hosts can surface sync diagnostics
+            try
+            {
+                await Console.Error.WriteAsync($"[sarifintown-sync] {message}").ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort stderr logging
+            }
+
+            try
+            {
+                string workspaceRoot;
+                lock (SyncRoot)
+                {
+                    workspaceRoot = _workspaceRoot;
+                }
+
+                var logPath = Path.Combine(Path.GetFullPath(workspaceRoot), ".sarif", "sarif_sync_http.log");
+                var logDirectory = Path.GetDirectoryName(logPath)!;
+                if (!Directory.Exists(logDirectory))
+                {
+                    Directory.CreateDirectory(logDirectory);
+                }
+
+                await File.AppendAllTextAsync(logPath, message).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Report file-write failures to stderr so they are visible in MCP output
+                try
+                {
+                    await Console.Error.WriteLineAsync($"[sarifintown-sync] WARNING: Failed to write sync log file: {ex.Message}").ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort stderr fallback
+                }
+            }
+        }
+
+        /// <summary>
         /// Extracts concatenated text from a <see cref="CallToolResult"/> for execution logging.
         /// </summary>
         private static string ExtractTextContent(CallToolResult result)
@@ -1966,27 +2291,15 @@ namespace Sarifintown.AgentEngine
                 throw new InvalidOperationException("Core engines are not initialized.");
             }
 
-            List<string> discoveredFiles;
             string workspaceRoot;
-            var stateService = StateService;
+            var stateService = GetOrCreateStateService();
             var snippetCache = SnippetCache;
             var snippetWarmupService = SnippetWarmupService;
 
             lock (SyncRoot)
             {
-                discoveredFiles = _discoveredSarifFiles.ToList();
                 workspaceRoot = _workspaceRoot;
             }
-
-            stateService ??= new SarifStateService(
-                FileReader,
-                Options.Create(new SarifOptions
-                {
-                    Strategy = PreloadStrategy.LatestPerTool,
-                    EnableSnippetPreload = true
-                }),
-                workspaceRoot,
-                discoveredFiles);
 
             snippetCache ??= new SnippetCacheService();
 

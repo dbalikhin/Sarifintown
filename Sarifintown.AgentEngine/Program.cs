@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using Sarifintown.AgentEngine;
 using Sarifintown.AgentEngine.Configuration;
+using Sarifintown.AgentEngine.Sync;
 using Sarifintown.Core;
 
 AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
@@ -58,6 +59,15 @@ builder.Services.Configure<SarifOptions>(
 builder.Services.Configure<PromptAssemblyOptions>(
     builder.Configuration.GetSection(PromptAssemblyOptions.SectionName));
 
+builder.Services.Configure<SyncOptions>(
+    builder.Configuration.GetSection(SyncOptions.SectionName));
+
+builder.Services.AddSingleton(new SyncHttpLoggingOptions(discovery.WorkspaceRoot));
+builder.Services.AddTransient<RedactingHttpLoggingHandler>();
+builder.Services
+    .AddHttpClient("SyncProviders")
+    .AddHttpMessageHandler<RedactingHttpLoggingHandler>();
+
 // Register Headless Implementations
 builder.Services.AddSingleton<IFileReader>(new NativeFileReader(discovery.WorkspaceRoot));
 builder.Services.AddSingleton<ITreeSitterEngine, V8TreeSitterEngine>();
@@ -104,6 +114,13 @@ await RunStartupStageAsync("SARIF state initialization", () => sarifStateService
 
 var snippetCacheService = app.Services.GetRequiredService<SnippetCacheService>();
 var snippetWarmupService = app.Services.GetRequiredService<SnippetWarmupService>();
+var syncOptions = NormalizeSyncOptions(app.Services.GetRequiredService<IOptions<SyncOptions>>().Value);
+
+WriteStartupInfo(
+    $"Sync options loaded: SnykToken={(string.IsNullOrWhiteSpace(syncOptions.SnykToken) ? "missing" : "configured")}, " +
+    $"SnykOrgId={(string.IsNullOrWhiteSpace(syncOptions.SnykOrgId) ? "missing" : "configured")}, " +
+    $"GitHubToken={(string.IsNullOrWhiteSpace(syncOptions.GitHubToken) ? "missing" : "configured")}, " +
+    $"GitHubRepo={(string.IsNullOrWhiteSpace(syncOptions.GitHubRepo) ? "missing" : "configured")}");
 
 // Inject dependencies into SarifTools
 SarifTools.FileReader = app.Services.GetRequiredService<IFileReader>();
@@ -112,6 +129,8 @@ SarifTools.StateService = sarifStateService;
 SarifTools.SnippetCache = snippetCacheService;
 SarifTools.SnippetWarmupService = snippetWarmupService;
 SarifTools.PromptAssembly = app.Services.GetRequiredService<IPromptAssemblyService>();
+SarifTools.SyncHttpClientFactory = () => app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("SyncProviders");
+SarifTools.SetSyncOptions(syncOptions);
 SarifTools.SetDiscoveredSarifFiles(discovery.SarifFiles);
 SarifTools.SetLocalUiBaseUrl(string.Empty);
 SarifTools.SetWorkspaceRoot(discovery.WorkspaceRoot);
@@ -304,6 +323,17 @@ static bool TryGetProperty(JsonElement element, string propertyName, out JsonEle
 
     value = default;
     return false;
+}
+
+static SyncOptions NormalizeSyncOptions(SyncOptions? options)
+{
+    return new SyncOptions
+    {
+        SnykToken = options?.SnykToken?.Trim(),
+        SnykOrgId = options?.SnykOrgId?.Trim(),
+        GitHubToken = options?.GitHubToken?.Trim(),
+        GitHubRepo = options?.GitHubRepo?.Trim()
+    };
 }
 
 var localUiBaseUrl = app.Urls.FirstOrDefault(url =>
