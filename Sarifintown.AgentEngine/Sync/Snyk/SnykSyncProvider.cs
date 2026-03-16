@@ -63,42 +63,55 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:SnykToken and Sync:SnykOrgId must be configured.", ShouldAbortBatch: true);
         }
 
-        var fingerprints = originalSarifResult.Fingerprints;
-        if (fingerprints == null || !fingerprints.TryGetValue(AssetFingerprintKey, out var issueId) || string.IsNullOrWhiteSpace(issueId))
+        var issueId = ResolveSnykTargetId(entry, originalSarifResult);
+        if (string.IsNullOrWhiteSpace(issueId))
         {
             return new SyncOperationResult(
                 false,
                 UpstreamSyncStatus.Failed,
-                "Missing 'snyk/asset/finding/v1' fingerprint. Consistent ignores requires this asset identifier.");
+                "Could not resolve a valid target Snyk issue ID to construct the policy condition.");
         }
 
-        var payload = new SnykIgnorePayload
+        var payload = new SnykPolicyPayload
         {
-            Data = new SnykIgnoreData
+            Data = new SnykPolicyData
             {
-                Attributes = new SnykIgnoreAttributes
+                Attributes = new SnykPolicyAttributes
                 {
-                    ReasonType = reasonType,
-                    Reason = BuildReason(entry, reasonPrefix)
-                },
-                Relationships = new SnykIgnoreRelationships
-                {
-                    Issue = new SnykIssueRelationship
+                    Name = $"Triage Sync: {issueId}",
+                    Action = new SnykPolicyAction
                     {
-                        Data = new SnykIssueData
+                        Data = new SnykPolicyActionData
                         {
-                            Id = issueId
+                            IgnoreType = reasonType,
+                            Reason = BuildReason(entry, reasonPrefix)
+                        }
+                    },
+                    ConditionsGroup = new SnykPolicyConditionsGroup
+                    {
+                        Conditions = new List<SnykPolicyCondition>
+                        {
+                            new()
+                            {
+                                Field = AssetFingerprintKey,
+                                Operator = "includes",
+                                Value = issueId
+                            }
                         }
                     }
                 }
             }
         };
 
-        var url = $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/ignores?version=2024-10-15~beta";
+        var isUpdate = !string.IsNullOrWhiteSpace(entry.Metadata.SnykPolicyId);
+        var endpointUrl = isUpdate
+            ? $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/policies/{Uri.EscapeDataString(entry.Metadata.SnykPolicyId)}?version=2025-11-05"
+            : $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/policies?version=2025-11-05";
+        var httpMethod = isUpdate ? HttpMethod.Patch : HttpMethod.Post;
 
         for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            using var request = new HttpRequestMessage(httpMethod, endpointUrl)
             {
                 Content = JsonContent.Create(payload, new MediaTypeHeaderValue("application/vnd.api+json"))
             };
@@ -108,14 +121,25 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
             var statusCode = response.StatusCode;
 
-            if (statusCode == HttpStatusCode.Created)
+            if (statusCode == HttpStatusCode.Created || statusCode == HttpStatusCode.OK)
             {
+                if (!isUpdate && statusCode == HttpStatusCode.Created)
+                {
+                    var responseData = await response.Content.ReadFromJsonAsync<SnykPolicyResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var policyId = responseData?.Data?.Id;
+                    if (!string.IsNullOrWhiteSpace(policyId))
+                    {
+                        var updatedMetadata = entry.Metadata with { SnykPolicyId = policyId };
+                        return new SyncOperationResult(true, UpstreamSyncStatus.Synced, null, UpdatedMetadata: updatedMetadata);
+                    }
+                }
+
                 return new SyncOperationResult(true, UpstreamSyncStatus.Synced, null);
             }
 
             if (statusCode == HttpStatusCode.Conflict)
             {
-                return new SyncOperationResult(true, UpstreamSyncStatus.Synced, "HTTP 409 Conflict: Already ignored upstream.");
+                return new SyncOperationResult(true, UpstreamSyncStatus.Synced, "HTTP 409 Conflict: Policy already exists upstream.");
             }
 
             if (statusCode == HttpStatusCode.NotFound)
@@ -184,6 +208,23 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             default:
                 return false;
         }
+    }
+
+    private static string? ResolveSnykTargetId(LedgerEntry entry, Result originalSarifResult)
+    {
+        var fingerprints = originalSarifResult.Fingerprints;
+
+        if (fingerprints != null && fingerprints.TryGetValue(AssetFingerprintKey, out var assetId) && !string.IsNullOrWhiteSpace(assetId))
+        {
+            return assetId;
+        }
+
+        if (fingerprints != null && fingerprints.TryGetValue("snyk/org/project/finding/v1", out var orgId) && !string.IsNullOrWhiteSpace(orgId))
+        {
+            return orgId;
+        }
+
+        return entry.FindingId;
     }
 
     private static string BuildReason(LedgerEntry entry, string reasonPrefix)

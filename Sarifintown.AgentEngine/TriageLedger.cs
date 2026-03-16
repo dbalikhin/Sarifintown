@@ -58,6 +58,9 @@ internal sealed record LedgerMetadata
 
     [JsonPropertyName("file_path")]
     public string FilePath { get; init; } = string.Empty;
+
+    [JsonPropertyName("snyk_policy_id")]
+    public string SnykPolicyId { get; init; } = string.Empty;
 }
 
 /// <summary>

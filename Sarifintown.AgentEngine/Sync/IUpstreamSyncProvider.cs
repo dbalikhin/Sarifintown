@@ -20,4 +20,5 @@ internal sealed record SyncOperationResult(
     bool IsSuccess,
     UpstreamSyncStatus Status,
     string? ErrorMessage,
-    bool ShouldAbortBatch = false);
+    bool ShouldAbortBatch = false,
+    LedgerMetadata? UpdatedMetadata = null);

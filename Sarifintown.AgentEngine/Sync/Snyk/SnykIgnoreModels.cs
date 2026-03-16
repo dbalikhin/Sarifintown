@@ -2,52 +2,70 @@ using System.Text.Json.Serialization;
 
 namespace Sarifintown.AgentEngine.Sync.Snyk;
 
-internal sealed class SnykIgnorePayload
+internal sealed class SnykPolicyPayload
 {
     [JsonPropertyName("data")]
-    public SnykIgnoreData Data { get; set; } = new();
+    public SnykPolicyData Data { get; set; } = new();
 }
 
-internal sealed class SnykIgnoreData
+internal sealed class SnykPolicyData
 {
     [JsonPropertyName("type")]
-    public string Type { get; set; } = "ignore";
+    public string Type { get; set; } = "policy";
 
     [JsonPropertyName("attributes")]
-    public SnykIgnoreAttributes Attributes { get; set; } = new();
-
-    [JsonPropertyName("relationships")]
-    public SnykIgnoreRelationships Relationships { get; set; } = new();
+    public SnykPolicyAttributes Attributes { get; set; } = new();
 }
 
-internal sealed class SnykIgnoreAttributes
+internal sealed class SnykPolicyAttributes
 {
-    [JsonPropertyName("reason_type")]
-    public string ReasonType { get; set; } = string.Empty;
+    [JsonPropertyName("action_type")]
+    public string ActionType { get; set; } = "ignore";
+
+    [JsonPropertyName("action")]
+    public SnykPolicyAction Action { get; set; } = new();
+
+    [JsonPropertyName("conditions_group")]
+    public SnykPolicyConditionsGroup ConditionsGroup { get; set; } = new();
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+}
+
+internal sealed class SnykPolicyAction
+{
+    [JsonPropertyName("data")]
+    public SnykPolicyActionData Data { get; set; } = new();
+}
+
+internal sealed class SnykPolicyActionData
+{
+    [JsonPropertyName("ignore_type")]
+    public string IgnoreType { get; set; } = string.Empty;
 
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
 }
 
-internal sealed class SnykIgnoreRelationships
+internal sealed class SnykPolicyConditionsGroup
 {
-    [JsonPropertyName("issue")]
-    public SnykIssueRelationship Issue { get; set; } = new();
+    [JsonPropertyName("logical_operator")]
+    public string LogicalOperator { get; set; } = "and";
+
+    [JsonPropertyName("conditions")]
+    public List<SnykPolicyCondition> Conditions { get; set; } = new();
 }
 
-internal sealed class SnykIssueRelationship
+internal sealed class SnykPolicyCondition
 {
-    [JsonPropertyName("data")]
-    public SnykIssueData Data { get; set; } = new();
-}
+    [JsonPropertyName("field")]
+    public string Field { get; set; } = "snyk/asset/finding/v1";
 
-internal sealed class SnykIssueData
-{
-    [JsonPropertyName("type")]
-    public string Type { get; set; } = "issue";
+    [JsonPropertyName("operator")]
+    public string Operator { get; set; } = "includes";
 
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = string.Empty;
+    [JsonPropertyName("value")]
+    public string Value { get; set; } = string.Empty;
 }
 
 internal sealed class SnykErrorResponse
@@ -63,4 +81,16 @@ internal sealed class SnykErrorDetail
 
     [JsonPropertyName("detail")]
     public string Detail { get; set; } = string.Empty;
+}
+
+internal sealed class SnykPolicyResponse
+{
+    [JsonPropertyName("data")]
+    public SnykPolicyResponseData? Data { get; set; }
+}
+
+internal sealed class SnykPolicyResponseData
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
 }
