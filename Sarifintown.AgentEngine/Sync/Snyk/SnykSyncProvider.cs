@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Sarifintown.AgentEngine.Sync.Snyk;
 
@@ -13,6 +14,13 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
     private const string AssetFingerprintKey = "snyk/asset/finding/v1";
     private const int MaxRateLimitRetries = 3;
     private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Strips local finding ID prefixes (e.g., "Finding 5:", "#3:", "Index 2:") that have no meaning upstream.
+    /// </summary>
+    private static readonly Regex LocalIdPrefixPattern = new(
+        @"^(Finding\s*#?\d+[:\s\-]+|#\d+[:\s\-]+|Index\s*\d+[:\s\-]+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly HttpClient _httpClient;
 
@@ -229,7 +237,7 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
 
     private static string BuildReason(LedgerEntry entry, string reasonPrefix)
     {
-        var reason = entry.TriageDecision.ShortReason;
+        var reason = SanitizeReason(entry.TriageDecision.ShortReason);
         if (string.IsNullOrWhiteSpace(reason))
         {
             reason = "Updated by sarif_sync";
@@ -238,6 +246,19 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
         return string.IsNullOrWhiteSpace(reasonPrefix)
             ? reason
             : string.Concat(reasonPrefix, reason);
+    }
+
+    /// <summary>
+    /// Strips local session-scoped identifiers that should not be sent to upstream APIs.
+    /// </summary>
+    internal static string SanitizeReason(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return reason;
+        }
+
+        return LocalIdPrefixPattern.Replace(reason, string.Empty).Trim();
     }
 
     private static TimeSpan ResolveRetryDelay(RetryConditionHeaderValue? retryAfter)

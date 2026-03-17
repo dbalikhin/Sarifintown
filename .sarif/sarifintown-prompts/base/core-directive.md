@@ -18,3 +18,10 @@ Use the following definitions to assess whether the finding is in a production c
     * **Inactive/Unreachable Code:** Code that is commented out or located after a definitive `return`, `exit`, or `throw` statement.
         * For SAST, this is a False Positive (it can't execute).
         * For Secrets, this is a True Positive (the secret is still exposed).
+
+## Batch Processing Rules
+When triaging multiple findings at once (e.g., "triage 1-10"):
+* Evaluate each finding individually. Each finding has its own unique code context and must receive its own distinct reason.
+* Call the sarif_update tool separately for each finding so that every finding receives its own context-specific reason.
+* Do not group distinct findings under a single generic or combined reason.
+* Do not reference other findings by local index (e.g., "Finding 5", "same as #3") in the reason. Each reason must be self-contained.
