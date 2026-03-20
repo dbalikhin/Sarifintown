@@ -46,6 +46,28 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        private sealed class StubSnykFailThenSuccessHandler : HttpMessageHandler
+        {
+            private int _callCount;
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                _callCount++;
+                if (_callCount == 1)
+                {
+                    return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound)
+                    {
+                        Content = new StringContent("{\"error\":\"not found\"}")
+                    });
+                }
+
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.Created)
+                {
+                    Content = new StringContent("{\"data\":{\"id\":\"ignore-2\"}}")
+                });
+            }
+        }
+
         [Test]
         public async Task SarifGet_WithKeepAndNoPageToken_AutoAdvancesWithinSameScope()
         {
@@ -95,6 +117,83 @@ namespace Sarifintown.AgentEngine.Tests
 
                 Assert.That(repeatedMeta.GetProperty("context").GetProperty("pagination").GetProperty("page_token").GetString(), Is.EqualTo("2"));
                 Assert.That(repeatedMeta.GetProperty("context").GetProperty("aliases")[0].GetProperty("displayid").GetString(), Is.EqualTo("3"));
+            }
+            finally
+            {
+                SetInternalSarifToolsProperty("SyncHttpClientFactory", null);
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifSync_WithPendingTarget_RetriesEntriesWithFailedSyncStatus()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-pending-retries-failed.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-PENDING-RETRY",
+                      "level": "error",
+                      "message": { "text": "retry failed sync status" },
+                      "fingerprints": {
+                        "snyk/asset/finding/v1": "issue-retry-1"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SarifTools.SetSyncOptions(new Sarifintown.AgentEngine.Configuration.SyncOptions
+            {
+                SnykToken = "token-retry",
+                SnykOrgId = "org-retry"
+            });
+
+            var handler = new StubSnykFailThenSuccessHandler();
+            var httpClient = CreateSyncHttpClientWithRedactingLogging(workspace, handler);
+            SetInternalSarifToolsProperty(
+                "SyncHttpClientFactory",
+                (Func<HttpClient>)(() => httpClient));
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "false_positive", reason: "retry-failed-entry");
+
+                var firstSyncResult = await SarifTools.SarifSync("pending");
+                var firstSyncText = ((TextContentBlock)firstSyncResult.Content[0]).Text;
+                Assert.That(firstSyncText, Contains.Substring("❌ **1** entries failed to sync."));
+
+                var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
+                var firstLedgerJson = await File.ReadAllTextAsync(ledgerPath);
+                using var firstLedgerDoc = JsonDocument.Parse(firstLedgerJson);
+                var firstEntry = firstLedgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
+                Assert.That(firstEntry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("failed"));
+
+                var secondSyncResult = await SarifTools.SarifSync("pending");
+                var secondSyncText = ((TextContentBlock)secondSyncResult.Content[0]).Text;
+                Assert.That(secondSyncText, Contains.Substring("✅ **1** entries synced successfully."));
+
+                var secondLedgerJson = await File.ReadAllTextAsync(ledgerPath);
+                using var secondLedgerDoc = JsonDocument.Parse(secondLedgerJson);
+                var secondEntry = secondLedgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
+                Assert.That(secondEntry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("synced"));
             }
             finally
             {

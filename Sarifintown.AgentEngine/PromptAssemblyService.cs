@@ -1,6 +1,4 @@
 using Microsoft.Extensions.Options;
-using System.Text;
-using System.Text.RegularExpressions;
 
 namespace Sarifintown.AgentEngine;
 
@@ -10,11 +8,11 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
     private const string BundledPromptsDirectoryName = "sarifintown-prompts";
     private const string BaseDirectoryName = "base";
     private const string CategoriesDirectoryName = "categories";
-    private const string OverridesDirectoryName = "org-overrides";
 
     private const string CoreDirectiveFileName = "core-directive.md";
     private const string OutputFormatFileName = "output-format.md";
     private const string SastCategoryFileName = "sast.md";
+    private const string SastSanitizersFileName = "sast-sanitizers.md";
     private const string SecretCategoryFileName = "secret.md";
     private const string ScaCategoryFileName = "sca.md";
 
@@ -65,6 +63,7 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         if (_enableSastModule)
         {
             sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastSanitizersFileName), cancellationToken).ConfigureAwait(false));
         }
 
         if (_enableSecretModule)
@@ -78,12 +77,6 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         }
 
         sections.Add(BuildFindingContextSection(resolvedRuleId, resolvedMessage, _templateStyle));
-
-        var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(overrideSection))
-        {
-            sections.Add(overrideSection);
-        }
 
         sections.Add(await ReadModuleOrMissingCommentAsync(outputFormatPath, cancellationToken).ConfigureAwait(false));
 
@@ -105,6 +98,7 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
         if (_enableSastModule)
         {
             sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastCategoryFileName), cancellationToken).ConfigureAwait(false));
+            sections.Add(await ReadModuleOrMissingCommentAsync(Path.Combine(_promptRootDirectory, CategoriesDirectoryName, SastSanitizersFileName), cancellationToken).ConfigureAwait(false));
         }
 
         if (_enableSecretModule)
@@ -122,49 +116,10 @@ public sealed class PromptAssemblyService : IPromptAssemblyService
             sections.Add(BuildFindingContextSection(finding.RuleId, finding.Message, _templateStyle));
         }
 
-        var overrideSection = await BuildOverrideSectionAsync(cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(overrideSection))
-        {
-            sections.Add(overrideSection);
-        }
-
         var outputFormatPath = Path.Combine(_promptRootDirectory, BaseDirectoryName, OutputFormatFileName);
         sections.Add(await ReadModuleOrMissingCommentAsync(outputFormatPath, cancellationToken).ConfigureAwait(false));
 
         return string.Join(Environment.NewLine, sections.Where(section => !string.IsNullOrWhiteSpace(section)));
-    }
-
-    private async Task<string> BuildOverrideSectionAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var overridesDirectoryPath = Path.Combine(_promptRootDirectory, OverridesDirectoryName);
-        if (!Directory.Exists(overridesDirectoryPath))
-        {
-            return string.Empty;
-        }
-
-        var overrideFiles = Directory
-            .EnumerateFiles(overridesDirectoryPath, "*.md", SearchOption.TopDirectoryOnly)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (overrideFiles.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        var builder = new StringBuilder();
-        builder.AppendLine("### Organizational Policies & Accepted Risks");
-
-        for (var index = 0; index < overrideFiles.Count; index++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var content = await ReadModuleOrMissingCommentAsync(overrideFiles[index], cancellationToken).ConfigureAwait(false);
-            builder.AppendLine(content);
-        }
-
-        return builder.ToString().TrimEnd();
     }
 
     private static string BuildFindingContextSection(string ruleId, string message, PromptTemplateStyle templateStyle)

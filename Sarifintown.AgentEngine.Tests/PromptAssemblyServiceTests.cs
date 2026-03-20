@@ -35,6 +35,7 @@ public class PromptAssemblyServiceTests
         {
             WriteCoreFiles(promptRoot);
             WriteCategoryFile(promptRoot, "sast.md", "# sast module");
+            WriteCategoryFile(promptRoot, "sast-sanitizers.md", "# sast sanitizers module");
             WriteCategoryFile(promptRoot, "secret.md", "# secret module");
             WriteCategoryFile(promptRoot, "sca.md", "# sca module");
 
@@ -43,6 +44,7 @@ public class PromptAssemblyServiceTests
             var prompt = await service.BuildTriagePromptAsync("CA3001", "Possible SQL injection");
 
             Assert.That(prompt.Contains("# sast module", StringComparison.Ordinal), Is.True);
+            Assert.That(prompt.Contains("# sast sanitizers module", StringComparison.Ordinal), Is.True);
             Assert.That(prompt.Contains("# secret module", StringComparison.Ordinal), Is.True);
             Assert.That(prompt.Contains("# sca module", StringComparison.Ordinal), Is.True);
         }
@@ -147,24 +149,59 @@ public class PromptAssemblyServiceTests
     }
 
     [Test]
-    public async Task BuildTriagePromptAsync_WhenOverridesExist_IncludesOverridesHeader()
+    public async Task BuildTriagePromptAsync_WhenSastEnabled_IncludesSanitizersImmediatelyAfterSast()
     {
         var promptRoot = CreatePromptRoot();
         try
         {
             WriteCoreFiles(promptRoot);
             WriteCategoryFile(promptRoot, "sast.md", "# sast module");
-
-            var overridesPath = Path.Combine(promptRoot, "org-overrides");
-            Directory.CreateDirectory(overridesPath);
-            File.WriteAllText(Path.Combine(overridesPath, "aaa.md"), "override-a");
-            File.WriteAllText(Path.Combine(overridesPath, "bbb.md"), "override-b");
+            WriteCategoryFile(promptRoot, "sast-sanitizers.md", "# sast sanitizers module");
+            WriteCategoryFile(promptRoot, "secret.md", "# secret module");
 
             var service = new PromptAssemblyService(promptRoot);
 
             var prompt = await service.BuildTriagePromptAsync("Rule", "message");
 
-            Assert.That(prompt.Contains("### Organizational Policies & Accepted Risks", StringComparison.Ordinal), Is.True);
+            var sastIndex = prompt.IndexOf("# sast module", StringComparison.Ordinal);
+            var sanitizersIndex = prompt.IndexOf("# sast sanitizers module", StringComparison.Ordinal);
+            var secretIndex = prompt.IndexOf("# secret module", StringComparison.Ordinal);
+
+            Assert.That(sastIndex >= 0, Is.True);
+            Assert.That(sanitizersIndex > sastIndex, Is.True);
+            Assert.That(secretIndex > sanitizersIndex, Is.True);
+        }
+        finally
+        {
+            Directory.Delete(promptRoot, true);
+        }
+    }
+
+    [Test]
+    public async Task BuildBatchTriagePromptAsync_WhenSastDisabled_ExcludesSastAndSanitizers()
+    {
+        var promptRoot = CreatePromptRoot();
+        try
+        {
+            WriteCoreFiles(promptRoot);
+            WriteCategoryFile(promptRoot, "sast.md", "# sast module");
+            WriteCategoryFile(promptRoot, "sast-sanitizers.md", "# sast sanitizers module");
+            WriteCategoryFile(promptRoot, "secret.md", "# secret module");
+
+            var options = Options.Create(new PromptAssemblyOptions
+            {
+                RootDirectoryPath = promptRoot,
+                EnableSastModule = false,
+                EnableSecretModule = true,
+                EnableScaModule = false
+            });
+
+            var service = new PromptAssemblyService(options);
+            var prompt = await service.BuildBatchTriagePromptAsync([("RULE-1", "message")]);
+
+            Assert.That(prompt.Contains("# sast module", StringComparison.Ordinal), Is.False);
+            Assert.That(prompt.Contains("# sast sanitizers module", StringComparison.Ordinal), Is.False);
+            Assert.That(prompt.Contains("# secret module", StringComparison.Ordinal), Is.True);
         }
         finally
         {

@@ -527,7 +527,12 @@ namespace Sarifintown.AgentEngine
             if (string.Equals(target, "pending", StringComparison.OrdinalIgnoreCase)
                 || string.IsNullOrWhiteSpace(target))
             {
-                entriesToSync = await ledger.GetBySyncStatusAsync(UpstreamSyncStatus.Pending);
+                var pendingEntries = await ledger.GetBySyncStatusAsync(UpstreamSyncStatus.Pending).ConfigureAwait(false);
+                var failedEntries = await ledger.GetBySyncStatusAsync(UpstreamSyncStatus.Failed).ConfigureAwait(false);
+                entriesToSync = pendingEntries
+                    .Concat(failedEntries)
+                    .DistinctBy(item => item.CompositeKey, StringComparer.Ordinal)
+                    .ToList();
             }
             else
             {
@@ -539,9 +544,9 @@ namespace Sarifintown.AgentEngine
 
             if (entriesToSync.Count == 0)
             {
-                var noOpResult = CreatePlainTextResult("ℹ️ No pending entries found in the triage ledger. Nothing to sync.");
+                var noOpResult = CreatePlainTextResult("ℹ️ No pending or failed entries found in the triage ledger. Nothing to sync.");
                 await AppendToExecutionLogAsync("sarif_sync",
-                    $"Input: target={target}\n\nOutput: No pending entries found.").ConfigureAwait(false);
+                    $"Input: target={target}\n\nOutput: No pending or failed entries found.").ConfigureAwait(false);
                 return noOpResult;
             }
 

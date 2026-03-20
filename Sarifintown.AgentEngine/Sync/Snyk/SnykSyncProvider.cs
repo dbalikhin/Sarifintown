@@ -94,7 +94,7 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             }
         };
 
-        var url = $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/ignores?version=2024-10-15~beta";
+        var url = $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/ignores?version=2025-11-05";  // 2024-10-15"~beta";
 
         for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
         {
