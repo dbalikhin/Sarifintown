@@ -68,6 +68,32 @@ namespace Sarifintown.AgentEngine.Tests
             }
         }
 
+        private sealed class StubSnykCaptureRequestHandler : HttpMessageHandler
+        {
+            public int CallCount { get; private set; }
+
+            public string LastRequestBody { get; private set; } = string.Empty;
+
+            public string LastRequestUri { get; private set; } = string.Empty;
+
+            public string LastAuthorizationHeader { get; private set; } = string.Empty;
+
+            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                CallCount++;
+                LastRequestUri = request.RequestUri?.ToString() ?? string.Empty;
+                LastAuthorizationHeader = request.Headers.Authorization?.ToString() ?? string.Empty;
+                LastRequestBody = request.Content == null
+                    ? string.Empty
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+
+                return new HttpResponseMessage(System.Net.HttpStatusCode.Created)
+                {
+                    Content = new StringContent("{\"data\":{\"id\":\"ignore-captured\"}}")
+                };
+            }
+        }
+
         [Test]
         public async Task SarifGet_WithKeepAndNoPageToken_AutoAdvancesWithinSameScope()
         {
@@ -126,6 +152,161 @@ namespace Sarifintown.AgentEngine.Tests
         }
 
         [Test]
+        public async Task SarifSync_WithIssueStyleFingerprint_FailsWithoutCallingSnykApi()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-issue-id-mismatch.sarif");
+            File.WriteAllText(sarifPath, """
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-ISSUE-ID",
+                      "level": "error",
+                      "message": { "text": "issue id mismatch" },
+                      "fingerprints": {
+                        "snyk/asset/finding/v1": "SNYK-JS-VULN-0001"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SarifTools.SetSyncOptions(new Sarifintown.AgentEngine.Configuration.SyncOptions
+            {
+                SnykToken = "token-issue-id",
+                SnykOrgId = "org-issue-id"
+            });
+
+            var handler = new StubSnykCaptureRequestHandler();
+            SetInternalSarifToolsProperty(
+                "SyncHttpClientFactory",
+                (Func<HttpClient>)(() => new HttpClient(handler, disposeHandler: false)));
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "false_positive", reason: "issue-id-mismatch");
+
+                var syncResult = await SarifTools.SarifSync("pending");
+                var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
+                Assert.That(syncText, Contains.Substring("❌ **1** entries failed to sync."));
+                Assert.That(handler.CallCount, Is.EqualTo(0));
+
+                var ledgerPath = Path.Combine(workspace, ".sarif", "triage-ledger.json");
+                var ledgerJson = await File.ReadAllTextAsync(ledgerPath);
+                using var ledgerDoc = JsonDocument.Parse(ledgerJson);
+                var entry = ledgerDoc.RootElement.GetProperty("entries").EnumerateObject().Single().Value;
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("status").GetString(), Is.EqualTo("failed"));
+                Assert.That(entry.GetProperty("upstream_sync").GetProperty("error_message").GetString(), Does.Contain("requires the finding UUID"));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
+        public async Task SarifSync_WithFindingFingerprint_SendsPoliciesPayloadAndUrl()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sarifDirectory = Path.Combine(workspace, ".sarif");
+            Directory.CreateDirectory(sarifDirectory);
+
+            const string findingId = "8f8b6f7f-35ab-4f9b-884f-5db471cc4c98";
+
+            var sarifPath = Path.Combine(sarifDirectory, "sync-finding-type.sarif");
+            File.WriteAllText(sarifPath, $$"""
+            {
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "SnykCode"
+                    }
+                  },
+                  "results": [
+                    {
+                      "ruleId": "RULE-SYNC-FINDING-TYPE",
+                      "level": "error",
+                      "message": { "text": "finding payload type" },
+                      "fingerprints": {
+                        "snyk/asset/finding/v1": "{{findingId}}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+            SarifTools.SetWorkspaceRoot(workspace);
+            SarifTools.SetDiscoveredSarifFiles(new[] { sarifPath });
+            SarifTools.SetSyncOptions(new Sarifintown.AgentEngine.Configuration.SyncOptions
+            {
+                SnykToken = "token-finding-id",
+                SnykOrgId = "org-finding-id"
+            });
+
+            var handler = new StubSnykCaptureRequestHandler();
+            SetInternalSarifToolsProperty(
+                "SyncHttpClientFactory",
+                (Func<HttpClient>)(() => new HttpClient(handler, disposeHandler: false)));
+
+            try
+            {
+                _ = await SarifTools.SarifGet(limit: 10);
+                _ = await SarifTools.SarifUpdate(target: "1", state: "false_positive", reason: "finding-type");
+
+                var syncResult = await SarifTools.SarifSync("pending");
+                var syncText = ((TextContentBlock)syncResult.Content[0]).Text;
+
+                Assert.That(syncText, Contains.Substring("✅ **1** entries synced successfully."));
+                Assert.That(handler.CallCount, Is.EqualTo(1));
+                Assert.That(handler.LastRequestUri, Does.Contain("/rest/orgs/org-finding-id/policies?version=2025-11-05"));
+                Assert.That(handler.LastAuthorizationHeader, Is.EqualTo("Token token-finding-id"));
+
+                using var payloadJson = JsonDocument.Parse(handler.LastRequestBody);
+                var attributes = payloadJson.RootElement
+                    .GetProperty("data")
+                    .GetProperty("attributes");
+
+                Assert.That(payloadJson.RootElement.GetProperty("data").GetProperty("type").GetString(), Is.EqualTo("policy"));
+                Assert.That(attributes.GetProperty("action_type").GetString(), Is.EqualTo("ignore"));
+                Assert.That(attributes.GetProperty("source").GetString(), Is.EqualTo("api"));
+                Assert.That(attributes.GetProperty("action").GetProperty("data").GetProperty("ignore_type").GetString(), Is.EqualTo("not-vulnerable"));
+                Assert.That(attributes.GetProperty("action").GetProperty("data").GetProperty("reason").GetString(), Is.EqualTo("finding-type"));
+                Assert.That(attributes.GetProperty("action").GetProperty("data").TryGetProperty("expires", out _), Is.False);
+                Assert.That(attributes.GetProperty("conditions_group").GetProperty("logical_operator").GetString(), Is.EqualTo("and"));
+
+                var firstCondition = attributes
+                    .GetProperty("conditions_group")
+                    .GetProperty("conditions")[0];
+
+                Assert.That(firstCondition.GetProperty("field").GetString(), Is.EqualTo("snyk/asset/finding/v1"));
+                Assert.That(firstCondition.GetProperty("operator").GetString(), Is.EqualTo("includes"));
+                Assert.That(firstCondition.GetProperty("value").GetString(), Is.EqualTo(findingId));
+            }
+            finally
+            {
+                Directory.Delete(workspace, true);
+            }
+        }
+
+        [Test]
         public async Task SarifSync_WithPendingTarget_RetriesEntriesWithFailedSyncStatus()
         {
             var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
@@ -148,7 +329,7 @@ namespace Sarifintown.AgentEngine.Tests
                       "level": "error",
                       "message": { "text": "retry failed sync status" },
                       "fingerprints": {
-                        "snyk/asset/finding/v1": "issue-retry-1"
+                        "snyk/asset/finding/v1": "4fa48d96-0a0f-4d76-afca-6cba4b5c80ce"
                       }
                     }
                   ]
@@ -1466,7 +1647,7 @@ namespace Sarifintown.AgentEngine.Tests
                       "level": "error",
                       "message": { "text": "sync with logging" },
                       "fingerprints": {
-                        "snyk/asset/finding/v1": "issue-123"
+                        "snyk/asset/finding/v1": "159a4407-880c-4022-9d29-b95fa6bcd9bc"
                       }
                     }
                   ]

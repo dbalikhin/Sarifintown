@@ -11,6 +11,7 @@ namespace Sarifintown.AgentEngine.Sync.Snyk;
 internal sealed class SnykSyncProvider : IUpstreamSyncProvider
 {
     private const string AssetFingerprintKey = "snyk/asset/finding/v1";
+    private const string SnykIssueIdPrefix = "SNYK-";
     private const int MaxRateLimitRetries = 3;
     private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromSeconds(2);
 
@@ -53,7 +54,7 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
         {
             var skipReason = entry.TriageDecision.State == TriageDecisionState.Confirmed
                 ? "Snyk does not support syncing true positives; only FP/WontFix/Mitigated/TestCode can be pushed upstream."
-                : $"Triage state '{entry.TriageDecision.State}' is not supported by the Snyk ignore API.";
+                : $"Triage state '{entry.TriageDecision.State}' is not supported by the Snyk policies API.";
             return new SyncOperationResult(true, UpstreamSyncStatus.Skipped, skipReason);
         }
 
@@ -63,38 +64,49 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             return new SyncOperationResult(false, UpstreamSyncStatus.Failed, "Sync:SnykToken and Sync:SnykOrgId must be configured.", ShouldAbortBatch: true);
         }
 
-        var fingerprints = originalSarifResult.Fingerprints;
-        if (fingerprints == null || !fingerprints.TryGetValue(AssetFingerprintKey, out var issueId) || string.IsNullOrWhiteSpace(issueId))
+        if (!TryResolveFindingId(originalSarifResult, out var findingId, out var findingResolutionError))
         {
             return new SyncOperationResult(
                 false,
                 UpstreamSyncStatus.Failed,
-                "Missing 'snyk/asset/finding/v1' fingerprint. Consistent ignores requires this asset identifier.");
+                findingResolutionError);
         }
 
-        var payload = new SnykIgnorePayload
+        var payload = new SnykPolicyPayload
         {
-            Data = new SnykIgnoreData
+            Data = new SnykPolicyData
             {
-                Attributes = new SnykIgnoreAttributes
+                Attributes = new SnykPolicyAttributes
                 {
-                    ReasonType = reasonType,
-                    Reason = BuildReason(entry, reasonPrefix)
-                },
-                Relationships = new SnykIgnoreRelationships
-                {
-                    Issue = new SnykIssueRelationship
+                    Name = BuildPolicyName(entry, findingId),    
+                    Action = new SnykPolicyAction
                     {
-                        Data = new SnykIssueData
+                        Data = new SnykPolicyActionData
                         {
-                            Id = issueId
+                            IgnoreType = reasonType,
+                            Reason = BuildReason(entry, reasonPrefix),
+                            Expires = null
+                        }
+                    },
+                           ActionType = "ignore",
+                           Source = "api",
+                    ConditionsGroup = new SnykPolicyConditionsGroup
+                    {
+                        Conditions = new List<SnykPolicyCondition>
+                        {
+                            new()
+                            {
+                                Field = AssetFingerprintKey,
+                                Operator = "includes",
+                                Value = findingId
+                            }
                         }
                     }
                 }
             }
         };
 
-        var url = $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/ignores?version=2025-11-05";  // 2024-10-15"~beta";
+        var url = $"https://api.snyk.io/rest/orgs/{Uri.EscapeDataString(options.SnykOrgId)}/policies?version=2025-11-05";
 
         for (var attempt = 0; attempt <= MaxRateLimitRetries; attempt++)
         {
@@ -102,7 +114,7 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             {
                 Content = JsonContent.Create(payload, new MediaTypeHeaderValue("application/vnd.api+json"))
             };
-            request.Headers.Authorization = new AuthenticationHeaderValue("TOKEN", options.SnykToken);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Token", options.SnykToken);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.api+json"));
 
             using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -115,7 +127,7 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
 
             if (statusCode == HttpStatusCode.Conflict)
             {
-                return new SyncOperationResult(true, UpstreamSyncStatus.Synced, "HTTP 409 Conflict: Already ignored upstream.");
+                return new SyncOperationResult(true, UpstreamSyncStatus.Synced, "HTTP 409 Conflict: Equivalent ignore policy already exists upstream.");
             }
 
             if (statusCode == HttpStatusCode.NotFound)
@@ -199,6 +211,14 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
             : string.Concat(reasonPrefix, reason);
     }
 
+    private static string BuildPolicyName(LedgerEntry entry, string findingId)
+    { 
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"Consistent Ignore {findingId}");
+    }
+
+
     private static TimeSpan ResolveRetryDelay(RetryConditionHeaderValue? retryAfter)
     {
         if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
@@ -222,6 +242,35 @@ internal sealed class SnykSyncProvider : IUpstreamSyncProvider
     {
         return originalSarifResult.Suppressions != null
                && originalSarifResult.Suppressions.Any(s => string.Equals(s.Status, "accepted", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TryResolveFindingId(Result originalSarifResult, out string findingId, out string error)
+    {
+        findingId = string.Empty;
+        error = string.Empty;
+
+        var fingerprints = originalSarifResult.Fingerprints;
+        if (fingerprints == null || !fingerprints.TryGetValue(AssetFingerprintKey, out var rawFingerprintValue) || string.IsNullOrWhiteSpace(rawFingerprintValue))
+        {
+            error = "Missing 'snyk/asset/finding/v1' fingerprint. Snyk sync requires a finding UUID for the occurrence.";
+            return false;
+        }
+
+        var candidateId = rawFingerprintValue.Trim();
+        if (candidateId.StartsWith(SnykIssueIdPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"Fingerprint '{AssetFingerprintKey}' contains issue id '{candidateId}'. Snyk policies API requires the finding UUID for the specific occurrence.";
+            return false;
+        }
+
+        if (!Guid.TryParse(candidateId, out _))
+        {
+            error = $"Fingerprint '{AssetFingerprintKey}' must be a UUID finding id, but value '{candidateId}' is not a valid UUID.";
+            return false;
+        }
+
+        findingId = candidateId;
+        return true;
     }
 
     private static async Task<string?> TryReadSnykErrorDetailAsync(HttpResponseMessage response, CancellationToken cancellationToken)
